@@ -1,0 +1,27 @@
+
+From 0000000000000000000000000000000000000001 Mon Sep 17 00:00:00 2001
+Subject: [PATCH 1/2] mm: Enable MGLRU (Multi-Generation LRU) backport for 5.10
+
+Enable Multi-Generation LRU for improved background app retention
+and reduced OOM kill rate on Android devices with 8GB+ RAM.
+
+Signed-off-by: Antigravity-CI <ci@antigravity.local>
+---
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -0,0 +0,0 @@ config UNEVICTABLE_LRU
++
++config LRU_GEN
++	bool "Multi-Gen LRU"
++	depends on MMU
++	help
++	  Enable multi-generation LRU for improved page reclaim performance.
++
++config LRU_GEN_ENABLED
++	bool "Enable multi-gen LRU by default"
++	depends on LRU_GEN
++	default y
++
++config LRU_GEN_STATS
++	bool "Full stats for multi-gen LRU"
++	depends on LRU_GEN
