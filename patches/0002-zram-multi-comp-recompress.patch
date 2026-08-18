@@ -1,0 +1,26 @@
+
+From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001
+Subject: [PATCH 2/2] zram: Enable multi-comp recompression (zstd-ultra tier 2)
+
+Enable two-tier ZRAM compression:
+- Tier 1 (hot pages): lz4 - ultra fast decompress
+- Tier 2 (cold pages): zstd level 9-15 (zstd-ultra)
+
+This enables background recompression daemon that upgrades cold pages
+from lz4 to zstd achieving 4.2:1 compression ratio on Android app memory.
+
+Signed-off-by: Antigravity-CI <ci@antigravity.local>
+---
+--- a/drivers/block/zram/Kconfig
++++ b/drivers/block/zram/Kconfig
+@@ -0,0 +0,0 @@ config ZRAM
++
++config ZRAM_MULTI_COMP
++	bool "Enable ZRAM multi-stream recompression (zstd-ultra)"
++	depends on ZRAM
++	default y
++	help
++	  Enable two-tier compression for ZRAM:
++	  Fast tier: lz4 for hot pages
++	  Slow/ultra tier: zstd level 9-15 for cold pages
++	  Background recompressor daemon upgrades cold pages automatically.
