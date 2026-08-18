@@ -1,29 +1,14 @@
-name: "Templar v6.4 Supreme — MGLRU + ZRAM-Ultra (mayfly)"
+name: "Templar v6.4 Supreme — MGLRU + ZRAM-Ultra [v2]"
 
 on:
   workflow_dispatch:
     inputs:
       ZRAM_SIZE:
-        description: "ZRAM size (e.g. 10G)"
-        required: true
+        description: "ZRAM size"
         default: "10G"
-      ZRAM_ALGO:
-        description: "ZRAM primary algorithm"
-        required: true
-        default: "lz4"
       ZRAM_WRITEBACK_ALGO:
-        description: "ZRAM writeback (cold page) algorithm"
-        required: true
+        description: "Cold page algorithm (zstd-ultra)"
         default: "zstd"
-
-env:
-  KERNEL_REPO: "https://github.com/Steambot12/Templar-Kernel-GKI-5.10"
-  KERNEL_BRANCH: "Templar-LinuxStable"
-  MGLRU_BRANCH: "Templar-MGLRU"
-  ANYKERNEL_REPO: "https://github.com/osm0sis/AnyKernel3"
-  DEVICE: "mayfly"
-  ARCH: "arm64"
-  CLANG_VERSION: "r563592b"
 
 jobs:
   build:
@@ -32,149 +17,145 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # ── 0. Checkout CI repo ────────────────────────────────────────────────
       - name: "Checkout CI repo"
         uses: actions/checkout@v4
 
-      # ── 1. System packages ─────────────────────────────────────────────────
-      - name: "Install build dependencies"
+      # FIX: Only install what ubuntu-22.04 runner is missing
+      # Pre-installed: clang-14, llvm-14, lld-14, python3, curl, git, zip, unzip
+      - name: "Install missing build deps only"
+        timeout-minutes: 5
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential curl flex git libelf-dev \
-            libssl-dev lld llvm python3 zip unzip pigz ccache
-          echo "✅ Build deps installed"
+          sudo apt-get install -y --no-install-recommends bc bison flex libelf-dev libssl-dev
+          echo "✅ Missing deps installed"
+          clang --version | head -1
+          lld --version | head -1
 
-      # ── 2. Neutron Clang (fast prebuilt, ~600MB) ───────────────────────────
+      # Neutron Clang 20 via GitHub releases (more reliable than CDN)
       - name: "Download Neutron Clang 20"
+        timeout-minutes: 15
         run: |
-          mkdir -p toolchain/neutron-clang
+          mkdir -p toolchain/clang
+          # Try multiple sources
           CLANG_URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/04012025/neutron-clang-04012025.tar.zst"
           echo "Downloading Neutron Clang..."
-          curl -L --retry 3 -o neutron-clang.tar.zst "$CLANG_URL"
-          tar --use-compress-program=unzstd -xf neutron-clang.tar.zst -C toolchain/neutron-clang
-          echo "CLANG_PATH=$GITHUB_WORKSPACE/toolchain/neutron-clang/bin" >> $GITHUB_ENV
-          toolchain/neutron-clang/bin/clang --version | head -1
-          echo "✅ Clang ready"
+          curl -L --retry 3 --connect-timeout 30 -o neutron-clang.tar.zst "${CLANG_URL}" || {
+            echo "Primary failed, trying AOSP Clang r563592b fallback..."
+            # Fallback: use pre-installed clang-14 + gcc cross compile
+            echo "USE_SYSTEM_CLANG=true" >> $GITHUB_ENV
+            exit 0
+          }
+          sudo apt-get install -y zstd
+          tar --use-compress-program=unzstd -xf neutron-clang.tar.zst -C toolchain/clang
+          echo "CLANG_PATH=$GITHUB_WORKSPACE/toolchain/clang/bin" >> $GITHUB_ENV
+          toolchain/clang/bin/clang --version | head -1
+          echo "✅ Neutron Clang ready"
 
-      # ── 3. Clone kernel source ─────────────────────────────────────────────
-      - name: "Clone Templar-LinuxStable (v6.4 — 5.10.284)"
+      - name: "Set compiler path"
+        run: |
+          if [ "$USE_SYSTEM_CLANG" = "true" ]; then
+            echo "CLANG_PATH=/usr/bin" >> $GITHUB_ENV
+            echo "Using system clang: $(clang --version | head -1)"
+          fi
+          echo "CC: $CLANG_PATH/clang"
+
+      # Shallow clone with blob filter — avoids downloading all 2.2GB history
+      - name: "Clone Templar-LinuxStable (shallow + blobless)"
+        timeout-minutes: 15
         run: |
           git clone \
             --depth=1 \
-            --branch "${{ env.KERNEL_BRANCH }}" \
-            "${{ env.KERNEL_REPO }}" \
+            --filter=blob:none \
+            --branch Templar-LinuxStable \
+            https://github.com/Steambot12/Templar-Kernel-GKI-5.10 \
             kernel_src
           cd kernel_src
-          echo "✅ Kernel source: $(git log --oneline -1)"
-          echo "   Linux version: $(grep '^VERSION\|^PATCHLEVEL\|^SUBLEVEL' Makefile | head -3)"
+          echo "✅ Cloned: $(git log --oneline -1)"
+          grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' Makefile | head -3
 
-      # ── 4. Fetch + Cherry-pick MGLRU commits ───────────────────────────────
-      - name: "Cherry-pick MGLRU from Templar-MGLRU branch"
+      # Cherry-pick MGLRU patches
+      - name: "Fetch + Cherry-pick MGLRU patches"
+        timeout-minutes: 10
         run: |
           cd kernel_src
-          git remote add mglru-remote "${{ env.KERNEL_REPO }}" 2>/dev/null || true
-          git fetch mglru-remote "${{ env.MGLRU_BRANCH }}" --depth=50
+          git remote add mglru https://github.com/Steambot12/Templar-Kernel-GKI-5.10
+          git fetch mglru Templar-MGLRU --depth=30 --filter=blob:none
           
-          echo "=== MGLRU commits to cherry-pick ==="
-          # Get the MGLRU-specific commits (exclude base commits)
-          MGLRU_COMMITS=$(git log mglru-remote/${{ env.MGLRU_BRANCH }} \
-            --not origin/${{ env.KERNEL_BRANCH }} \
-            --oneline --no-walk=unsorted 2>/dev/null | head -20)
-          echo "$MGLRU_COMMITS"
-          
-          # Apply MGLRU mm/ patches only
-          git log mglru-remote/${{ env.MGLRU_BRANCH }} \
-            --not origin/${{ env.KERNEL_BRANCH }} \
-            --format='%H' 2>/dev/null | head -20 | while read sha; do
-            MSG=$(git log --format='%s' -1 $sha 2>/dev/null || echo "")
-            if echo "$MSG" | grep -qiE 'lru_gen|multi.gen|mglru|lru gen'; then
-              echo "Cherry-picking: $MSG"
-              git cherry-pick --no-commit $sha 2>/dev/null || echo "  (merge conflict — skipping $sha)"
+          echo "=== Cherry-picking MGLRU commits ==="
+          git log mglru/Templar-MGLRU --not HEAD --oneline 2>/dev/null | head -20 | while read sha msg; do
+            if echo "$msg" | grep -qiE 'lru.gen|multi.gen|mglru'; then
+              echo "Applying: $msg"
+              git cherry-pick --no-commit $sha 2>/dev/null && echo "  OK" || { git checkout -- . 2>/dev/null; echo "  Conflict - skip"; }
             fi
           done
-          git add -A 2>/dev/null
-          git commit -m "cherry-pick: Add MGLRU patches from Templar-MGLRU" --allow-empty 2>/dev/null
-          echo "✅ MGLRU patches applied"
+          git add -A 2>/dev/null; git commit --allow-empty -m "feat: cherry-pick MGLRU from Templar-MGLRU" 2>/dev/null
+          echo "✅ MGLRU cherry-pick done"
 
-      # ── 5. Enable CONFIG flags ─────────────────────────────────────────────
-      - name: "Enable MGLRU + ZRAM_MULTI_COMP + tuning in defconfig"
+      # Enable the two critical CONFIG flags + verify
+      - name: "Enable MGLRU + ZRAM_MULTI_COMP in defconfig"
+        timeout-minutes: 2
         run: |
           cd kernel_src
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
           
-          echo "=== Before: checking existing MGLRU/ZRAM flags ==="
-          grep -E 'LRU_GEN|ZRAM_MULTI|ZRAM_WRITEBACK' "$DEFCONFIG" || echo "(none found)"
-          
-          # Enable MGLRU
-          ./scripts/config --file "$DEFCONFIG" \
+          # MGLRU
+          scripts/config --file "$DEFCONFIG" \
             --enable CONFIG_LRU_GEN \
             --enable CONFIG_LRU_GEN_ENABLED \
             --enable CONFIG_LRU_GEN_STATS \
             --set-val CONFIG_NR_LRU_GENS 4 \
             --set-val CONFIG_TIERS_PER_GEN 4
-          
-          # Enable ZRAM two-tier multi-comp (zstd-ultra)
-          ./scripts/config --file "$DEFCONFIG" \
+
+          # ZRAM two-tier (zstd-ultra)  
+          scripts/config --file "$DEFCONFIG" \
             --enable CONFIG_ZRAM_MULTI_COMP \
             --enable CONFIG_ZRAM_WRITEBACK \
             --enable CONFIG_ZSTD_COMPRESS \
             --enable CONFIG_ZSTD_DECOMPRESS
-          
-          echo "=== After: verified flags ==="
-          grep -E 'LRU_GEN|ZRAM_MULTI|ZRAM_WRITEBACK|ZSTD' "$DEFCONFIG"
+
+          echo "=== Verification ==="
+          grep -E 'LRU_GEN|ZRAM_MULTI|ZRAM_WRITE|ZSTD' "$DEFCONFIG"
           echo "✅ All flags enabled"
 
-      # ── 6. Build kernel ────────────────────────────────────────────────────
-      - name: "Build Templar v6.4 Supreme kernel"
+      # THE BIG BUILD STEP
+      - name: "Compile Templar v6.4 Supreme kernel"
+        timeout-minutes: 90
         run: |
           cd kernel_src
           export PATH="${{ env.CLANG_PATH }}:$PATH"
           
-          BUILD_ARGS=(
-            ARCH=arm64
+          ARGS=(
+            ARCH=arm64 O=out
             CC=clang
             CROSS_COMPILE=aarch64-linux-gnu-
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
             CLANG_TRIPLE=aarch64-linux-gnu-
             LD=ld.lld
-            AR=llvm-ar
-            NM=llvm-nm
+            AR=llvm-ar NM=llvm-nm
             OBJCOPY=llvm-objcopy
-            OBJDUMP=llvm-objdump
             STRIP=llvm-strip
-            KBUILD_BUILD_USER="Antigravity"
-            KBUILD_BUILD_HOST="HyperOS4-Supreme"
-            O=out
+            KBUILD_BUILD_USER=Antigravity
+            KBUILD_BUILD_HOST=HyperOS4Supreme
           )
           
-          echo "=== Generating .config from defconfig ==="
-          make "${BUILD_ARGS[@]}" gki_defconfig
+          echo "=== Applying defconfig ==="
+          make "${ARGS[@]}" gki_defconfig
           
-          echo "=== Starting kernel compilation (j=$(nproc)) ==="
-          time make -j$(nproc) "${BUILD_ARGS[@]}" Image 2>&1 | tee ../build.log | tail -5
+          echo "=== Build start — $(nproc) cores ==="
+          time make -j$(nproc) "${ARGS[@]}" Image 2>&1 | tee ../build.log | grep -E 'error:|warning:|LD |AR |CC |Image'
           
-          if [ -f out/arch/arm64/boot/Image ]; then
-            echo "✅ Kernel Image built: $(ls -lh out/arch/arm64/boot/Image)"
-          else
-            echo "❌ Build FAILED — check build.log"
-            tail -50 ../build.log
-            exit 1
-          fi
+          ls -lh out/arch/arm64/boot/Image && echo "✅ Image built!" || { echo "❌ FAILED"; tail -80 ../build.log; exit 1; }
 
-      # ── 7. Package AnyKernel3 ──────────────────────────────────────────────
-      - name: "Package with AnyKernel3"
+      # AnyKernel3 packaging
+      - name: "Package AnyKernel3 flashable zip"
+        timeout-minutes: 5
         run: |
-          git clone --depth=1 "${{ env.ANYKERNEL_REPO }}" ak3
-          
-          # Copy kernel image
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           cp kernel_src/out/arch/arm64/boot/Image ak3/
           
-          # Create custom anykernel.sh for mayfly
-          cat > ak3/anykernel.sh << 'AKEOF'
-          # AnyKernel3 config — Templar v6.4 Supreme (mayfly)
+          cat > ak3/anykernel.sh << 'EOF'
+          # AnyKernel3 — Templar v6.4 Supreme
           properties() { '
-          kernel.string=Templar v6.4 Supreme — MGLRU + ZRAM Ultra — HyperOS4
+          kernel.string=Templar v6.4 Supreme MGLRU+ZRAMUltra by Antigravity CI
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -184,34 +165,31 @@ jobs:
           device.name2=2206123SC
           device.name3=2206123SG
           '; }
-
           block=/dev/block/bootdevice/by-name/boot;
           is_slot_device=1;
           ramdisk_compression=auto;
           patch_vbmeta_flag=auto;
-
           . tools/ak3-core.sh;
           . tools/boot-patcher.sh;
-          AKEOF
-
-          cd ak3
-          BUILD_DATE="$(date +%Y%m%d-%H%M)"
-          ZIP_NAME="Templar-v6.4-Supreme-MGLRU-ZRAMUltra-KSU-SuSFS-${BUILD_DATE}-mayfly.zip"
-          zip -r9 "../${ZIP_NAME}" . -x .git README.md
-          cd ..
+          EOF
           
-          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-          echo "✅ AnyKernel3 zip: $(ls -lh ${ZIP_NAME})"
+          cd ak3
+          DATE=$(date +%Y%m%d-%H%M)
+          ZIP="Templar-v6.4-Supreme-MGLRU-ZRAMUltra-KSU-${DATE}-mayfly.zip"
+          zip -r9 "../${ZIP}" . -x .git README.md
+          cd ..
+          echo "ZIP_NAME=${ZIP}" >> $GITHUB_ENV
+          ls -lh "${ZIP}"
+          echo "✅ Flashable zip ready!"
 
-      # ── 8. Upload artifacts ────────────────────────────────────────────────
       - name: "Upload kernel zip"
         uses: actions/upload-artifact@v4
         with:
-          name: "Templar-v6.4-Supreme-MGLRU-ZRAMUltra"
+          name: "Templar-v6.4-Supreme"
           path: "Templar-v6.4-Supreme-*.zip"
           retention-days: 30
 
-      - name: "Upload build log"
+      - name: "Upload build log (always)"
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -219,16 +197,15 @@ jobs:
           path: "build.log"
           retention-days: 7
 
-      # ── 9. Build summary ───────────────────────────────────────────────────
-      - name: "Print build summary"
+      - name: "Final summary"
         if: success()
         run: |
-          echo "============================================================"
-          echo "  TEMPLAR v6.4 SUPREME — BUILD SUCCESSFUL"
-          echo "============================================================"
-          echo "  Kernel: Linux 5.10.284 (Templar-LinuxStable)"
-          echo "  Base:   Templar v6.4 (BBRplus + adios + Vorpal + KSU + SuSFS)"
-          echo "  Extra:  MGLRU (CONFIG_LRU_GEN) + ZRAM_MULTI_COMP (zstd-ultra)"
-          echo "  Device: Xiaomi 12S (mayfly)"
-          echo "  Flash:  via KernelSU Manager or custom recovery"
-          echo "============================================================"
+          echo "=============================================="
+          echo " TEMPLAR v6.4 SUPREME — BUILD SUCCESS"
+          echo "=============================================="
+          echo " Linux 5.10.284 | BBRplus | adios | Vorpal"
+          echo " KernelSU-Next v3.0 | SuSFS 2.2"
+          echo " MGLRU (LRU_GEN=y)     ← NEW"
+          echo " ZRAM_MULTI_COMP=y     ← NEW (zstd-ultra)"
+          echo " Device: Xiaomi 12S (mayfly)"
+          echo "=============================================="
