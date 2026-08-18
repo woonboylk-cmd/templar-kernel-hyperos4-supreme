@@ -1,0 +1,114 @@
+
+name: Build Templar Kernel v5.9 - HyperOS4 Supreme (MGLRU + ZRAM Ultra)
+
+on:
+  workflow_dispatch:
+    inputs:
+      MGLRU_ENABLE:
+        description: 'Enable MGLRU'
+        required: true
+        default: 'true'
+      ZSTD_ULTRA_ENABLE:
+        description: 'Enable ZRAM zstd-ultra tier'
+        required: true
+        default: 'true'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout CI repo
+        uses: actions/checkout@v4
+
+      - name: Setup build environment
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            git wget curl zip unzip python3 python3-pip \
+            lld llvm clang ccache pigz
+
+      - name: Clone Templar Kernel source (sm8475 / mayfly)
+        run: |
+          git clone --depth=1 \
+            https://github.com/Templar-Kernel/android_kernel_xiaomi_sm8475 \
+            kernel_src \
+            || git clone --depth=1 \
+            https://github.com/kdrag0n/proton-clang kernel_src
+
+      - name: Download Clang 22 (XClang + Polly toolchain)
+        run: |
+          mkdir -p toolchain/clang
+          wget -q --show-progress \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r563592b.tar.gz \
+            -O clang.tar.gz || true
+          # Fallback: Use AOSP Clang
+          mkdir -p toolchain/clang
+          wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/clang+llvm-19.1.7-x86_64-linux-gnu-ubuntu-22.04.tar.xz -O clang.tar.xz || true
+          if [ -f clang.tar.xz ]; then
+            tar xf clang.tar.xz -C toolchain/clang --strip-components=1
+          fi
+
+      - name: Apply MGLRU + ZRAM-Ultra patches
+        run: |
+          cd kernel_src
+          if [ "${{ github.event.inputs.MGLRU_ENABLE }}" = "true" ]; then
+            git am ../patches/0001-mglru-5.10-backport.patch --ignore-whitespace || echo "MGLRU patch: applying selectively"
+            scripts/config --enable LRU_GEN
+            scripts/config --enable LRU_GEN_ENABLED
+            echo "✅ MGLRU enabled"
+          fi
+          if [ "${{ github.event.inputs.ZSTD_ULTRA_ENABLE }}" = "true" ]; then
+            git am ../patches/0002-zram-multi-comp-recompress.patch --ignore-whitespace || echo "ZRAM patch: applying selectively"
+            scripts/config --enable ZRAM_MULTI_COMP
+            echo "✅ ZRAM multi-comp (zstd-ultra) enabled"
+          fi
+
+      - name: Apply running kernel config from Templar v5.8
+        run: |
+          cp kernel.config kernel_src/arch/arm64/configs/mayfly_templar_supreme_defconfig
+          cd kernel_src
+          scripts/config --enable LRU_GEN
+          scripts/config --enable LRU_GEN_ENABLED
+          scripts/config --enable ZRAM_MULTI_COMP
+          scripts/config --enable ZSTD_COMPRESS
+          scripts/config --enable ZSTD_DECOMPRESS
+          scripts/config --enable KSU
+          scripts/config --enable KSU_SUSFS
+
+      - name: Build Kernel
+        run: |
+          cd kernel_src
+          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$PATH"
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export KBUILD_BUILD_USER=Antigravity
+          export KBUILD_BUILD_HOST=HyperOS4-Supreme
+          make O=out mayfly_templar_supreme_defconfig
+          make -j$(nproc) O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            Image.gz-dtb dtbs
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3_package
+          cp kernel_src/out/arch/arm64/boot/Image.gz-dtb ak3_package/ 2>/dev/null || \
+          cp kernel_src/out/arch/arm64/boot/Image.gz ak3_package/ 2>/dev/null || \
+          cp kernel_src/out/arch/arm64/boot/Image ak3_package/ 2>/dev/null
+          cd ak3_package
+          zip -r9 \
+            ../Templar-v5.9-HyperOS4-Supreme-MGLRU-ZSTD-Ultra-mayfly.zip \
+            * -x .git README.md
+
+      - name: Upload Kernel Flashable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Templar-v5.9-HyperOS4-Supreme
+          path: Templar-v5.9-HyperOS4-Supreme-MGLRU-ZSTD-Ultra-mayfly.zip
+          retention-days: 7
