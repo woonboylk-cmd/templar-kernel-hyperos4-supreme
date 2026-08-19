@@ -1,0 +1,54 @@
+name: Build Templar Supreme MGLRU
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3
+          
+      - name: Clone Kernel Source
+        run: |
+          git clone --depth=1 --branch Templar-LinuxStable https://github.com/Steambot12/Templar-Kernel-GKI-5.10.git kernel
+          
+      - name: Clone Toolchain
+        run: |
+          git clone --depth=1 https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r445002.git clang
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9.git gcc
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9.git gcc32
+          
+      - name: Patch Defconfig for MGLRU and ZSTD
+        run: |
+          cd kernel
+          # Apply MGLRU
+          sed -i 's/# CONFIG_LRU_GEN is not set/CONFIG_LRU_GEN=y\nCONFIG_LRU_GEN_ENABLED=y\nCONFIG_LRU_GEN_STATS=y/' arch/arm64/configs/gki_defconfig
+          # Apply ZSTD
+          sed -i 's/# CONFIG_ZSTD_COMPRESS is not set/CONFIG_ZSTD_COMPRESS=y/' arch/arm64/configs/gki_defconfig
+          sed -i 's/# CONFIG_ZSTD_DECOMPRESS is not set/CONFIG_ZSTD_DECOMPRESS=y/' arch/arm64/configs/gki_defconfig
+          sed -i 's/# CONFIG_CRYPTO_ZSTD is not set/CONFIG_CRYPTO_ZSTD=y/' arch/arm64/configs/gki_defconfig
+          
+      - name: Compile Kernel
+        run: |
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc/bin:$GITHUB_WORKSPACE/gcc32/bin:$PATH"
+          cd kernel
+          make O=out ARCH=arm64 gki_defconfig
+          make -j$(nproc) O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip Image Image.lz4
+          
+      - name: Package AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp kernel/out/arch/arm64/boot/Image AnyKernel3/
+          cd AnyKernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          sed -i 's/kernel.string=.*/kernel.string=Templar Supreme MGLRU by Antigravity/g' anykernel.sh
+          zip -r9 ../Templar-Supreme-MGLRU-mayfly.zip *
+          
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Templar-Supreme-MGLRU-mayfly
+          path: Templar-Supreme-MGLRU-mayfly.zip
