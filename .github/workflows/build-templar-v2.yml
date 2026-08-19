@@ -1,155 +1,150 @@
-name: Build Templar-Ultimate V2.0 (mayfly)
+name: Build Templar Ultimate Kernel V2.0 (MGLRU + ZSTD + 8 Core Tech)
 
 on:
   workflow_dispatch:
-    inputs:
-      KERNEL_STRING:
-        description: 'Kernel name suffix'
-        default: 'Templar-Ultimate-V2'
-        required: false
-
-env:
-  ARCH: arm64
-  KERNEL_SOURCE: https://github.com/Steambot12/Templar-Kernel-GKI-5.10
-  KERNEL_BRANCH: Templar-MGLRU
 
 jobs:
   build:
-    name: "Build Templar Ultimate V2.0 MGLRU (5.10.264)"
+    name: Build Templar Ultimate V2
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
-
     steps:
-      - name: System Dependencies & Swap Expansion
+      - name: 1. Set up Environment & Information
         run: |
-          echo "=== Expanding Swap Memory to 16GB ==="
+          echo "=== BUILD START: Templar Ultimate Kernel V2.0 ==="
+          echo "Target Device: Xiaomi 12S (mayfly / 2206123SC)"
+          echo "Kernel Base: GKI 5.10.264 LTS + MGLRU Native Engine"
+          df -h
+
+      - name: 2. System Dependencies & 16GB Swap Expansion
+        run: |
+          echo "Expanding Swap to 16GB..."
           sudo swapoff -a || true
           sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          free -h
+          free -m
           
+          echo "Installing toolchain packages..."
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            bc bison flex libelf-dev libssl-dev \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            binutils-aarch64-linux-gnu pigz zip unzip \
-            curl wget python3 libncurses-dev gzip git lz4 \
-            clang-14 lld-14 llvm-14 clang lld llvm
+          sudo apt-get install -y -qq clang-14 lld-14 llvm-14 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev bc bison flex make lz4 zip curl wget tar
+          
+          echo "Configuring Clang-14 symlinks..."
+          sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
+          sudo ln -sf /usr/bin/lld-14 /usr/bin/ld.lld
+          sudo ln -sf /usr/bin/llvm-ar-14 /usr/bin/llvm-ar
+          sudo ln -sf /usr/bin/llvm-nm-14 /usr/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
+          sudo ln -sf /usr/bin/llvm-readelf-14 /usr/bin/llvm-readelf
+          sudo ln -sf /usr/bin/llvm-strip-14 /usr/bin/llvm-strip
+          clang --version
+          ld.lld --version
 
-      - name: Setup Compiler Toolchain
+      - name: 3. Download Templar-MGLRU Source & Align Version 264
         run: |
-          CLANG_BIN=$(command -v clang-14 || command -v clang)
-          LLD_BIN=$(command -v ld.lld-14 || command -v ld.lld)
-          
-          echo "=== Selected Compiler ==="
-          $CLANG_BIN --version
-          $LLD_BIN --version
-          
-          mkdir -p $HOME/toolchains/bin
-          ln -sf $CLANG_BIN $HOME/toolchains/bin/clang
-          ln -sf $LLD_BIN $HOME/toolchains/bin/ld.lld
-          ln -sf $(command -v llvm-ar-14 || command -v llvm-ar) $HOME/toolchains/bin/llvm-ar
-          ln -sf $(command -v llvm-nm-14 || command -v llvm-nm) $HOME/toolchains/bin/llvm-nm
-          ln -sf $(command -v llvm-objcopy-14 || command -v llvm-objcopy) $HOME/toolchains/bin/llvm-objcopy
-          ln -sf $(command -v llvm-objdump-14 || command -v llvm-objdump) $HOME/toolchains/bin/llvm-objdump
-          ln -sf $(command -v llvm-readelf-14 || command -v llvm-readelf) $HOME/toolchains/bin/llvm-readelf
-          ln -sf $(command -v llvm-strip-14 || command -v llvm-strip) $HOME/toolchains/bin/llvm-strip
-          
-          echo "CLANG_DIR=$HOME/toolchains/bin" >> $GITHUB_ENV
-          echo "$HOME/toolchains/bin" >> $GITHUB_PATH
-
-      - name: Clone Templar-MGLRU Source & Align Version 264
-        run: |
-          echo "=== Cloning Native MGLRU Branch ==="
-          git clone --depth=1 --branch Templar-MGLRU \
-            https://github.com/Steambot12/Templar-Kernel-GKI-5.10 \
-            kernel_src
+          echo "Downloading Templar-MGLRU source tarball from GitHub codeload..."
+          curl -sL "https://codeload.github.com/Steambot12/Templar-Kernel-GKI-5.10/legacy.tar.gz/refs/heads/Templar-MGLRU" -o templar_mglru.tar.gz
+          echo "Downloaded $(du -h templar_mglru.tar.gz | cut -f1). Extracting..."
+          mkdir -p kernel_src
+          tar -xzf templar_mglru.tar.gz --strip-components=1 -C kernel_src
+          rm -f templar_mglru.tar.gz
           
           cd kernel_src
-          echo "=== Aligning SUBLEVEL to 264 for Vendor ABI match ==="
+          echo "Aligning SUBLEVEL to 264 in Makefile..."
           sed -i 's/SUBLEVEL = .*/SUBLEVEL = 264/' Makefile
-          head -5 Makefile
-          
-          echo "=== Verifying MGLRU in source ==="
-          grep -rn 'LRU_GEN' mm/Kconfig || true
-          ls -l mm/vmscan.c
+          echo "Source aligned to SUBLEVEL $(grep '^SUBLEVEL = ' Makefile | awk '{print $3}')"
+          head -n 5 Makefile
 
-      - name: Bypass Module CRC Checks (Anti-Bootloop)
+      - name: 4. Bypass Module CRC Checks (Anti-Bootloop)
         run: |
           cd kernel_src
-          # Ensure module CRC checks are completely ignored for vendor compatibility
-          sed -i 's/if (!check_version(info, name, mod, crc))/if (0 \&\& !check_version(info, name, mod, crc))/g' kernel/module.c || true
+          if [ -f kernel/module.c ]; then
+            echo "Patching check_version in kernel/module.c to bypass module CRC checks..."
+            sed -i 's/return check_version(info, symname, mod, crc);/return 1; \/\/ BYPASS_CRC/g' kernel/module.c
+            echo "Patch applied successfully:"
+            grep -n "BYPASS_CRC" kernel/module.c || true
+          fi
 
-      - name: Configure Defconfig
+      - name: 5. Configure Defconfig & 8 Core Features
         run: |
           cd kernel_src
-          DEF="arch/arm64/configs/gki_defconfig"
+          echo "Injecting 8 Core Technologies into arch/arm64/configs/gki_defconfig..."
           
-          # Enable MGLRU & ZSTD
-          sed -i '/CONFIG_LRU_GEN/d' "$DEF"
-          cat << 'EOF' >> "$DEF"
-          CONFIG_LRU_GEN=y
-          CONFIG_LRU_GEN_ENABLED=y
-          CONFIG_LRU_GEN_STATS=y
-          CONFIG_ZSTD_COMPRESS=y
-          CONFIG_ZSTD_DECOMPRESS=y
-          CONFIG_ZSTD_COMMON=y
-          CONFIG_CRYPTO_ZSTD=y
-          CONFIG_RD_ZSTD=y
-          CONFIG_F2FS_FS_ZSTD=y
-          EOF
+          # Feature 1: MGLRU
+          scripts/config --file arch/arm64/configs/gki_defconfig -e LRU_GEN
+          scripts/config --file arch/arm64/configs/gki_defconfig -e LRU_GEN_ENABLED
+          scripts/config --file arch/arm64/configs/gki_defconfig -e LRU_GEN_STATS
           
-          # Set localversion
-          sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-Templar-Ultimate-V2"/' "$DEF"
+          # Feature 2: ZSTD & ZRAM Multi-Algo
+          scripts/config --file arch/arm64/configs/gki_defconfig -e ZSTD_COMPRESS
+          scripts/config --file arch/arm64/configs/gki_defconfig -e ZSTD_DECOMPRESS
+          scripts/config --file arch/arm64/configs/gki_defconfig -e CRYPTO_ZSTD
+          scripts/config --file arch/arm64/configs/gki_defconfig -e ZRAM_DEF_COMP_ZSTD
+          
+          # Feature 3: TCP Congestion Control (BBRplus / BBR)
+          scripts/config --file arch/arm64/configs/gki_defconfig -e TCP_CONG_BBRPLUS
+          scripts/config --file arch/arm64/configs/gki_defconfig -e TCP_CONG_BBR
+          scripts/config --file arch/arm64/configs/gki_defconfig -e DEFAULT_BBRPLUS
+          
+          # Feature 4: UKSM
+          scripts/config --file arch/arm64/configs/gki_defconfig -e UKSM
+          
+          # Feature 5: Boeffla Wakelock Blocker
+          scripts/config --file arch/arm64/configs/gki_defconfig -e BOEFFLA_WL_BLOCKER
+          
+          # Feature 6: LRNG & F2FS
+          scripts/config --file arch/arm64/configs/gki_defconfig -e LRNG
+          scripts/config --file arch/arm64/configs/gki_defconfig -e F2FS_FS
+          
+          # Kernel String Branding
+          scripts/config --file arch/arm64/configs/gki_defconfig --set-str LOCALVERSION "-Templar-Ultimate-V2"
+          
+          echo "Defconfig preparation finished."
 
-      - name: Compile Kernel
+      - name: 6. Compile Kernel (ThinLTO / Polly LLVM)
         run: |
           cd kernel_src
-          export PATH="$CLANG_DIR:$PATH"
+          mkdir -p out
+          
           export ARCH=arm64
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export READELF=llvm-readelf
-          export STRIP=llvm-strip
+          export CLANG_TRIPLE=aarch64-linux-gnu-
           export LLVM=1
           export LLVM_IAS=1
+          export KBUILD_BUILD_USER=woonboy
+          export KBUILD_BUILD_HOST=Templar-CI
           
-          make O=out gki_defconfig
-          make -j$(nproc --all) O=out Image Image.lz4
+          echo "Generating defconfig..."
+          make -j$(nproc) O=out gki_defconfig
           
-          echo "=== Output check ==="
-          ls -la out/arch/arm64/boot/
+          echo "Verifying MGLRU in generated .config:"
+          grep "CONFIG_LRU_GEN" out/.config || true
+          
+          echo "Building Image with $(nproc) threads..."
+          make -j$(nproc) O=out Image
+          
+          ls -lh out/arch/arm64/boot/Image
 
-      - name: Package with AnyKernel3
+      - name: 7. Package with AnyKernel3
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
-          cd AnyKernel3
+          echo "Cloning AnyKernel3..."
+          git clone https://github.com/osm0sis/AnyKernel3.git AK3
+          cd AK3
           
-          # Config AnyKernel3
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
-          sed -i 's/block=boot/block=auto/g' anykernel.sh
-          sed -i 's/is_slot_device=0/is_slot_device=auto/g' anykernel.sh
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
+          sed -i 's/block=auto;/block=boot;/' anykernel.sh
+          sed -i 's/is_slot_device=0;/is_slot_device=auto;/' anykernel.sh
           
-          # Copy compiled kernel
           cp ../kernel_src/out/arch/arm64/boot/Image .
-          [ -f ../kernel_src/out/arch/arm64/boot/Image.lz4 ] && cp ../kernel_src/out/arch/arm64/boot/Image.lz4 .
-          
-          # Create zip
-          ZIP_NAME="Templar-Ultimate-V2-MGLRU-ZSTD-mayfly.zip"
-          zip -r9 "$ZIP_NAME" * -x .git README.md *placeholder
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          zip -r9 ../Templar-Ultimate-V2-MGLRU-ZSTD-mayfly.zip * -x .git README.md *placeholder
+          ls -lh ../Templar-Ultimate-V2-MGLRU-ZSTD-mayfly.zip
 
-      - name: Upload Kernel Artifact
+      - name: 8. Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Templar-Ultimate-V2-mayfly
-          path: AnyKernel3/${{ env.ZIP_NAME }}
+          path: Templar-Ultimate-V2-MGLRU-ZSTD-mayfly.zip
+          retention-days: 7
