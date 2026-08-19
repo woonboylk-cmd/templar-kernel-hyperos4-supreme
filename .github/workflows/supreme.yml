@@ -32,15 +32,10 @@ jobs:
       # ─────────────────────────────────────────────
       # 0. Checkout CI repo (for kernel.config, patches)
       # ─────────────────────────────────────────────
-      - name: Free Disk Space & Create Swap (For LTO)
-        run: |
-          sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile
-          sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=10240
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          free -h
+      - name: Create swap
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
 
       - name: Checkout CI repo
         uses: actions/checkout@v4
