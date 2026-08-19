@@ -71,6 +71,7 @@ jobs:
             echo "=== Clang version ==="
             $HOME/toolchains/clang/bin/clang --version || true
             echo "CLANG_DIR=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
+            echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
           else
             echo "CLANG_DIR=/usr/bin" >> $GITHUB_ENV
           fi
@@ -242,6 +243,8 @@ jobs:
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' arch/arm64/configs/gki_defconfig
           sed -i 's/CONFIG_CC_STACKPROTECTOR=y/# CONFIG_CC_STACKPROTECTOR is not set/' arch/arm64/configs/gki_defconfig
           echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> arch/arm64/configs/gki_defconfig
+          
+          export PATH="${CLANG_DIR}:${PATH}"
           
           make -j${CORES} ARCH=arm64 O=out \
             CC="${CLANG_BIN}" \
