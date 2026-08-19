@@ -256,6 +256,10 @@ jobs:
           
           export PATH="${CLANG_DIR}:${PATH}"
           
+          # Start background heartbeat to keep GitHub Actions alive during silent LTO link phase
+          (while true; do sleep 20; echo "[LTO Heartbeat $(date +%T)] Mem: $(free -m | awk '/Mem:/ {print $3"MB/"$2"MB"}') | Swap: $(free -m | awk '/Swap:/ {print $3"MB/"$2"MB"}')"; done) &
+          HEARTBEAT_PID=$!
+          
           make -j${CORES} ARCH=arm64 O=out \
             CC="${CLANG_BIN}" \
             LD="${LLD_BIN}" \
@@ -264,6 +268,14 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             LLVM=1 LLVM_IAS=1 \
             Image Image.lz4 2>&1 | tee /tmp/build.log
+          
+          BUILD_STATUS=${PIPESTATUS[0]}
+          kill $HEARTBEAT_PID 2>/dev/null || true
+          
+          if [ $BUILD_STATUS -ne 0 ]; then
+            echo "Build failed with exit code $BUILD_STATUS"
+            exit $BUILD_STATUS
+          fi
           
           echo "=== End: $(date) ==="
           
