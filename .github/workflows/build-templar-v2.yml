@@ -20,8 +20,16 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: System Dependencies
+      - name: System Dependencies & Swap Expansion
         run: |
+          echo "=== Expanding Swap Memory ==="
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libelf-dev libssl-dev \
@@ -29,12 +37,15 @@ jobs:
             binutils-aarch64-linux-gnu pigz zip unzip \
             curl wget python3 libncurses-dev gzip git
 
-      - name: Download ZyC Clang Toolchain
+      - name: Download ZyC Clang 16 Toolchain
         run: |
           mkdir -p $HOME/toolchains/clang
-          wget -q --show-progress -O /tmp/clang.tar.gz \
-            "https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20220914-release/Clang-14.0.6-20220914.tar.gz"
+          CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260807-release/Clang-16.0.6-20260807.tar.gz"
+          echo "=== Downloading ZyC Clang 16 from $CLANG_URL ==="
+          wget -q --show-progress -O /tmp/clang.tar.gz "$CLANG_URL"
           tar -C $HOME/toolchains/clang -xzf /tmp/clang.tar.gz
+          echo "=== Clang version ==="
+          $HOME/toolchains/clang/bin/clang --version || true
           echo "CLANG_DIR=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
 
       - name: Clone Kernel Source & Integrate MGLRU
