@@ -16,10 +16,20 @@ jobs:
           df -h
           free -m
 
-      - name: 2. Setup Toolchain & Dependencies
+      - name: 2. Setup 16GB Swap on /mnt & Toolchain
         run: |
+          echo "Creating 16GB Swap on high-speed /mnt disk..."
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=16384
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -m
+          
+          echo "Installing toolchain packages non-interactively..."
+          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get install -y -qq --no-install-recommends \
             clang-14 lld-14 llvm-14 \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             libssl-dev libelf-dev bc bison flex make \
@@ -94,6 +104,10 @@ jobs:
           scripts/config --file arch/arm64/configs/gki_defconfig -e LRNG
           scripts/config --file arch/arm64/configs/gki_defconfig -e F2FS_FS
           
+          # Feature 7: ThinLTO (Optimized LTO link to prevent OOM crash)
+          scripts/config --file arch/arm64/configs/gki_defconfig -d LTO_CLANG_FULL
+          scripts/config --file arch/arm64/configs/gki_defconfig -e LTO_CLANG_THIN
+          
           # Kernel String Branding
           scripts/config --file arch/arm64/configs/gki_defconfig --set-str LOCALVERSION "-Templar-Ultimate-V2"
           
@@ -117,8 +131,9 @@ jobs:
           echo "Generating defconfig..."
           make -j$(nproc) O=out gki_defconfig
           
-          echo "Verifying MGLRU in generated .config:"
+          echo "Verifying MGLRU and ThinLTO in generated .config:"
           grep "CONFIG_LRU_GEN" out/.config || true
+          grep "CONFIG_LTO" out/.config || true
           
           echo "Building Image with $(nproc) threads..."
           make -j$(nproc) O=out Image
