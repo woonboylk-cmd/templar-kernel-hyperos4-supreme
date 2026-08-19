@@ -35,28 +35,30 @@ jobs:
             bc bison flex libelf-dev libssl-dev \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu pigz zip unzip \
-            curl wget python3 libncurses-dev gzip git
+            curl wget python3 libncurses-dev gzip git \
+            clang-14 lld-14 llvm-14 clang lld llvm
 
-      - name: Download & Setup ZyC Clang 16 Toolchain
+      - name: Setup Compiler Toolchain
         run: |
-          mkdir -p $HOME/toolchains/clang /tmp/clang_ext
-          CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260807-release/Clang-16.0.6-20260807.tar.gz"
-          echo "=== Downloading ZyC Clang 16 from $CLANG_URL ==="
-          wget -q --show-progress -O /tmp/clang.tar.gz "$CLANG_URL"
+          CLANG_BIN=$(command -v clang-14 || command -v clang)
+          LLD_BIN=$(command -v ld.lld-14 || command -v ld.lld)
           
-          echo "=== Extracting Toolchain ==="
-          tar -C /tmp/clang_ext -xzf /tmp/clang.tar.gz
-          if [ -d /tmp/clang_ext/bin ]; then
-            cp -r /tmp/clang_ext/* $HOME/toolchains/clang/
-          else
-            cp -r /tmp/clang_ext/*/* $HOME/toolchains/clang/
-          fi
+          echo "=== Selected Compiler ==="
+          $CLANG_BIN --version
+          $LLD_BIN --version
           
-          echo "=== Verifying Clang Version ==="
-          $HOME/toolchains/clang/bin/clang --version
-          $HOME/toolchains/clang/bin/ld.lld --version
-          echo "CLANG_DIR=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
-          echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
+          mkdir -p $HOME/toolchains/bin
+          ln -sf $CLANG_BIN $HOME/toolchains/bin/clang
+          ln -sf $LLD_BIN $HOME/toolchains/bin/ld.lld
+          ln -sf $(command -v llvm-ar-14 || command -v llvm-ar) $HOME/toolchains/bin/llvm-ar
+          ln -sf $(command -v llvm-nm-14 || command -v llvm-nm) $HOME/toolchains/bin/llvm-nm
+          ln -sf $(command -v llvm-objcopy-14 || command -v llvm-objcopy) $HOME/toolchains/bin/llvm-objcopy
+          ln -sf $(command -v llvm-objdump-14 || command -v llvm-objdump) $HOME/toolchains/bin/llvm-objdump
+          ln -sf $(command -v llvm-readelf-14 || command -v llvm-readelf) $HOME/toolchains/bin/llvm-readelf
+          ln -sf $(command -v llvm-strip-14 || command -v llvm-strip) $HOME/toolchains/bin/llvm-strip
+          
+          echo "CLANG_DIR=$HOME/toolchains/bin" >> $GITHUB_ENV
+          echo "$HOME/toolchains/bin" >> $GITHUB_PATH
 
       - name: Clone Kernel Source & Integrate MGLRU
         run: |
