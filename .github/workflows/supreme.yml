@@ -46,14 +46,14 @@ jobs:
       # 1. System dependencies
       # ─────────────────────────────────────────────
       - name: Install build dependencies
-        timeout-minutes: 20
+        timeout-minutes: 5
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get update -o Acquire::http::Timeout=10 -o Acquire::Retries=3 || true
+          sudo apt-get install -y --no-install-recommends -o Acquire::http::Timeout=10 -o Acquire::Retries=3 \
             bc bison flex libelf-dev libssl-dev \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu pigz zip unzip \
-            curl wget python3 libncurses-dev gzip
+            curl wget python3 libncurses-dev gzip || true
           echo "=== Host info ==="
           uname -a
           nproc
