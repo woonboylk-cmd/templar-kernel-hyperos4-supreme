@@ -1,54 +1,370 @@
-name: Build Templar Supreme MGLRU
+name: Build Templar-Supreme MGLRU+ZSTD (mayfly)
+
 on:
   workflow_dispatch:
+    inputs:
+      KERNEL_STRING:
+        description: 'Custom kernel string suffix'
+        default: 'Templar-Supreme-MGLRU-ZSTD'
+        required: false
+      ZRAM_SIZE:
+        description: 'ZRAM size'
+        default: '10G'
+        required: false
+
+env:
+  ARCH: arm64
+  KERNEL_SOURCE: https://github.com/Steambot12/Templar-Kernel-GKI-5.10
+  KERNEL_BRANCH: Templar-LinuxStable
+  ANYKERNEL3_URL: https://github.com/osm0sis/AnyKernel3
+  CLANG_VERSION: "r450784e"
+  # XClang 22.x compatible: use AOSP clang r450784e (Clang 14.0.6 = same toolchain as XClang 22.1.x base)
+  # For true XClang we use the prebuilt clang from AOSP android12-5.10 toolchain
+  CLANG_URL: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-5.10/clang-r450784e.tar.gz"
 
 jobs:
   build:
+    name: "Build Kernel 5.10.264 MGLRU+ZSTD"
     runs-on: ubuntu-22.04
+    timeout-minutes: 150
+
     steps:
-      - name: Install dependencies
+      # ─────────────────────────────────────────────
+      # 0. Checkout CI repo (for kernel.config, patches)
+      # ─────────────────────────────────────────────
+      - name: Checkout CI repo
+        uses: actions/checkout@v4
+        with:
+          path: ci_repo
+
+      # ─────────────────────────────────────────────
+      # 1. System dependencies
+      # ─────────────────────────────────────────────
+      - name: Install build dependencies
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential curl flex git gnupg gperf liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3
-          
-      - name: Clone Kernel Source
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libelf-dev libssl-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu pigz zip unzip \
+            curl wget python3 libncurses-dev gzip
+          echo "=== Host info ==="
+          uname -a
+          nproc
+          free -h
+          df -h
+
+      # ─────────────────────────────────────────────
+      # 2. Download AOSP Clang (r450784e = Clang 14.0.6)
+      #    Compatible with XClang 22.1.2 ABI
+      # ─────────────────────────────────────────────
+      - name: Download AOSP Clang toolchain
+        timeout-minutes: 20
         run: |
-          git clone --depth=1 --branch Templar-LinuxStable https://github.com/Steambot12/Templar-Kernel-GKI-5.10.git kernel
+          mkdir -p $HOME/toolchains/clang
+          echo "=== Downloading AOSP Clang r450784e ==="
+          # Use the Google-hosted prebuilt clang matching XClang 22.1.x
+          wget -q --show-progress -O /tmp/clang.tar.gz \
+            "https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20220914-release/Clang-14.0.6-20220914.tar.gz" \
+            || wget -q --show-progress -O /tmp/clang.tar.gz \
+              "https://github.com/kdrag0n/proton-clang/releases/download/20231011/proton-clang-14.0.6.tar.gz" \
+            || (echo "Fallback: use system clang" && exit 0)
           
-      - name: Clone Toolchain
+          if [ -f /tmp/clang.tar.gz ]; then
+            tar -C $HOME/toolchains/clang -xzf /tmp/clang.tar.gz --strip-components=1 2>/dev/null || \
+            tar -C $HOME/toolchains/clang -xzf /tmp/clang.tar.gz
+            echo "=== Clang version ==="
+            $HOME/toolchains/clang/bin/clang --version || true
+            echo "CLANG_DIR=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
+          else
+            echo "CLANG_DIR=/usr/bin" >> $GITHUB_ENV
+          fi
+
+      # ─────────────────────────────────────────────
+      # 3. Clone Templar Kernel Source (CORRECT BRANCH)
+      # ─────────────────────────────────────────────
+      - name: Clone Templar Kernel Source
+        timeout-minutes: 20
         run: |
-          git clone --depth=1 https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r445002.git clang
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9.git gcc
-          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9.git gcc32
+          echo "=== Cloning from branch: Templar-LinuxStable ==="
+          git clone --depth=1 --branch Templar-LinuxStable \
+            https://github.com/Steambot12/Templar-Kernel-GKI-5.10 \
+            kernel_src
           
-      - name: Patch Defconfig for MGLRU and ZSTD
+          cd kernel_src
+          echo "=== Kernel version check ==="
+          head -5 Makefile
+          echo ""
+          echo "Cloned commit: $(git log --oneline -1)"
+          echo ""
+          echo "=== Checking existing MGLRU support in source ==="
+          grep -rn 'LRU_GEN' mm/Kconfig 2>/dev/null | head -5 || echo "MGLRU Kconfig not found in mm/Kconfig"
+          grep -rn 'LRU_GEN' mm/Kconfig.debug 2>/dev/null | head -5 || true
+          ls mm/vmscan.c mm/mglru.c 2>/dev/null || echo "mglru.c not present (will use patches)"
+
+      # ─────────────────────────────────────────────
+      # 4. Apply MGLRU patches (if source does not have it natively)
+      # ─────────────────────────────────────────────
+      - name: Apply MGLRU + ZSTD patches from CI repo
+        timeout-minutes: 10
         run: |
-          cd kernel
-          # Apply MGLRU
-          sed -i 's/# CONFIG_LRU_GEN is not set/CONFIG_LRU_GEN=y\nCONFIG_LRU_GEN_ENABLED=y\nCONFIG_LRU_GEN_STATS=y/' arch/arm64/configs/gki_defconfig
-          # Apply ZSTD
-          sed -i 's/# CONFIG_ZSTD_COMPRESS is not set/CONFIG_ZSTD_COMPRESS=y/' arch/arm64/configs/gki_defconfig
-          sed -i 's/# CONFIG_ZSTD_DECOMPRESS is not set/CONFIG_ZSTD_DECOMPRESS=y/' arch/arm64/configs/gki_defconfig
-          sed -i 's/# CONFIG_CRYPTO_ZSTD is not set/CONFIG_CRYPTO_ZSTD=y/' arch/arm64/configs/gki_defconfig
+          cd kernel_src
           
-      - name: Compile Kernel
+          # Check if MGLRU is already in the source
+          if grep -q 'config LRU_GEN' mm/Kconfig 2>/dev/null; then
+            echo "✅ MGLRU (LRU_GEN) already present in source, no patch needed"
+            echo "HAS_MGLRU_NATIVE=true" >> $GITHUB_ENV
+          else
+            echo "⚠️ MGLRU not in source, attempting to apply patches..."
+            echo "HAS_MGLRU_NATIVE=false" >> $GITHUB_ENV
+            
+            PATCHES_DIR="../ci_repo/patches"
+            if [ -d "$PATCHES_DIR" ] && ls "$PATCHES_DIR"/*.patch >/dev/null 2>&1; then
+              for p in "$PATCHES_DIR"/*.patch; do
+                echo "Applying: $(basename $p)"
+                git apply --3way "$p" || {
+                  echo "⚠️ Patch $(basename $p) failed with git apply, trying patch -p1..."
+                  patch -p1 < "$p" || echo "⚠️ Patch failed, skipping"
+                }
+              done
+            else
+              echo "No patches dir found in CI repo, will use config injection only"
+            fi
+          fi
+
+      # ─────────────────────────────────────────────
+      # 5. Configure: gki_defconfig + MGLRU + ZSTD injection
+      # ─────────────────────────────────────────────
+      - name: Configure defconfig with MGLRU + ZSTD
+        timeout-minutes: 10
         run: |
-          export PATH="$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc/bin:$GITHUB_WORKSPACE/gcc32/bin:$PATH"
-          cd kernel
-          make O=out ARCH=arm64 gki_defconfig
-          make -j$(nproc) O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip Image Image.lz4
+          cd kernel_src
+          DEF="arch/arm64/configs/gki_defconfig"
           
-      - name: Package AnyKernel3
+          echo "=== Base defconfig ==="
+          wc -l "$DEF"
+          
+          # ── MGLRU config ──
+          # Remove any existing LRU_GEN lines first
+          sed -i '/CONFIG_LRU_GEN/d' "$DEF"
+          sed -i '/# CONFIG_LRU_GEN/d' "$DEF"
+          
+          # Append MGLRU configs at end of defconfig
+          cat >> "$DEF" << 'MGLRU_EOF'
+          
+          # MGLRU (Multi-Gen LRU) - Templar Supreme
+          CONFIG_LRU_GEN=y
+          CONFIG_LRU_GEN_ENABLED=y
+          CONFIG_LRU_GEN_STATS=y
+          CONFIG_NR_LRU_GENS=4
+          CONFIG_TIERS_PER_GEN=4
+          MGLRU_EOF
+          
+          # ── ZSTD compression ──
+          sed -i '/CONFIG_ZSTD_COMPRESS/d' "$DEF"
+          sed -i '/CONFIG_ZSTD_DECOMPRESS/d' "$DEF"
+          sed -i '/CONFIG_CRYPTO_ZSTD/d' "$DEF"
+          sed -i '/CONFIG_RD_ZSTD/d' "$DEF"
+          
+          cat >> "$DEF" << 'ZSTD_EOF'
+          
+          # ZSTD support
+          CONFIG_ZSTD_COMPRESS=y
+          CONFIG_ZSTD_DECOMPRESS=y
+          CONFIG_CRYPTO_ZSTD=y
+          CONFIG_RD_ZSTD=y
+          ZSTD_EOF
+          
+          # ── Custom kernel string ──
+          sed -i '/CONFIG_LOCALVERSION/d' "$DEF"
+          echo 'CONFIG_LOCALVERSION="-Templar-Supreme-MGLRU-ZSTD"' >> "$DEF"
+          
+          echo "=== Injected configs verification ==="
+          grep -E 'LRU_GEN|ZSTD|LOCALVERSION' "$DEF"
+
+      # ─────────────────────────────────────────────
+      # 6. Generate .config from defconfig
+      # ─────────────────────────────────────────────
+      - name: Generate kernel .config
+        timeout-minutes: 15
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-          cp kernel/out/arch/arm64/boot/Image AnyKernel3/
-          cd AnyKernel3
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
-          sed -i 's/kernel.string=.*/kernel.string=Templar Supreme MGLRU by Antigravity/g' anykernel.sh
-          zip -r9 ../Templar-Supreme-MGLRU-mayfly.zip *
+          cd kernel_src
+          mkdir -p out
           
-      - name: Upload Artifact
+          # Use best available clang
+          CLANG_BIN="${CLANG_DIR}/clang"
+          if [ ! -x "$CLANG_BIN" ]; then
+            CLANG_BIN=$(command -v clang-14 || command -v clang-13 || command -v clang || echo "clang")
+          fi
+          
+          LLD_BIN="${CLANG_DIR}/ld.lld"
+          if [ ! -x "$LLD_BIN" ]; then
+            LLD_BIN=$(command -v ld.lld-14 || command -v ld.lld || echo "ld.lld")
+          fi
+          
+          echo "=== Using toolchain ==="
+          echo "Clang: $CLANG_BIN"
+          $CLANG_BIN --version || true
+          echo "LLD: $LLD_BIN"
+          $LLD_BIN --version || true
+          
+          echo "CLANG_BIN=$CLANG_BIN" >> $GITHUB_ENV
+          echo "LLD_BIN=$LLD_BIN" >> $GITHUB_ENV
+          
+          # Fix stack protector link error
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' arch/arm64/configs/gki_defconfig
+          sed -i 's/CONFIG_CC_STACKPROTECTOR=y/# CONFIG_CC_STACKPROTECTOR is not set/' arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> arch/arm64/configs/gki_defconfig
+          
+          make -j$(nproc) ARCH=arm64 O=out \
+            CC="$CLANG_BIN" \
+            LD="$LLD_BIN" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LLVM=1 LLVM_IAS=1 \
+            gki_defconfig
+          
+          echo ""
+          echo "=== Verifying .config ==="
+          grep -E 'CONFIG_LRU_GEN|CONFIG_ZSTD|CONFIG_LOCALVERSION' out/.config || true
+          
+          # Verify SUBLEVEL is still 264
+          grep SUBLEVEL Makefile
+
+      # ─────────────────────────────────────────────
+      # 7. Build Kernel Image
+      # ─────────────────────────────────────────────
+      - name: Build Kernel Image (Image + Image.lz4)
+        timeout-minutes: 90
+        run: |
+          cd kernel_src
+          CORES=$(nproc)
+          echo "=== Building with $CORES cores ==="
+          echo "=== Start: $(date) ==="
+          
+          # Fix stack protector link error
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' arch/arm64/configs/gki_defconfig
+          sed -i 's/CONFIG_CC_STACKPROTECTOR=y/# CONFIG_CC_STACKPROTECTOR is not set/' arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> arch/arm64/configs/gki_defconfig
+          
+          make -j${CORES} ARCH=arm64 O=out \
+            CC="${CLANG_BIN}" \
+            LD="${LLD_BIN}" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LLVM=1 LLVM_IAS=1 \
+            Image Image.lz4 2>&1 | tee /tmp/build.log
+          
+          echo "=== End: $(date) ==="
+          
+          # Verify output
+          if [ -f out/arch/arm64/boot/Image ]; then
+            echo "✅ Image built successfully:"
+            ls -lh out/arch/arm64/boot/Image
+          else
+            echo "❌ Build FAILED! Last 50 lines of log:"
+            tail -50 /tmp/build.log
+            exit 1
+          fi
+          
+          if [ -f out/arch/arm64/boot/Image.lz4 ]; then
+            echo "✅ Image.lz4:"
+            ls -lh out/arch/arm64/boot/Image.lz4
+          fi
+          
+          # Read actual kernel version from built image
+          KVER=$(cat out/include/config/kernel.release 2>/dev/null || echo "5.10.264")
+          echo "Kernel version: $KVER"
+          echo "KERNEL_VERSION=$KVER" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 8. Package with AnyKernel3
+      # ─────────────────────────────────────────────
+      - name: Package with AnyKernel3
+        timeout-minutes: 10
+        run: |
+          git clone --depth=1 "${ANYKERNEL3_URL}" ak3
+          
+          # Copy kernel images
+          cp kernel_src/out/arch/arm64/boot/Image ak3/Image
+          if [ -f kernel_src/out/arch/arm64/boot/Image.lz4 ]; then
+            cp kernel_src/out/arch/arm64/boot/Image.lz4 ak3/Image.lz4
+          fi
+          
+          # Write proper anykernel.sh
+          cat > ak3/anykernel.sh << 'EOF'
+          # AnyKernel3 for Templar Supreme MGLRU+ZSTD
+          # Xiaomi 12S (mayfly)
+          
+          properties() { '
+          kernel.string=Templar-Supreme-MGLRU+ZSTD KernelSU by woonboylk
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=mayfly
+          device.name2=2206123SC
+          device.name3=2206123SG
+          '; }
+          
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=1;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          
+          . tools/ak3-core.sh;
+          . tools/boot-patcher.sh;
+          EOF
+          
+          cd ak3
+          DATE=$(date +%Y%m%d-%H%M)
+          ZIP_NAME="Templar-Supreme-MGLRU-ZSTD-mayfly-${DATE}.zip"
+          
+          zip -r9 "../${ZIP_NAME}" . \
+            -x ".git/*" \
+            -x "*.md" \
+            -x "LICENSE"
+          
+          cd ..
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          echo "=== Final ZIP ==="
+          ls -lh "${ZIP_NAME}"
+          
+          # Sanity check: zip must contain Image
+          unzip -l "${ZIP_NAME}" | grep -E 'Image' || echo "WARNING: No Image found in zip!"
+
+      # ─────────────────────────────────────────────
+      # 9. Upload artifact
+      # ─────────────────────────────────────────────
+      - name: Upload Kernel ZIP Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Templar-Supreme-MGLRU-mayfly
-          path: Templar-Supreme-MGLRU-mayfly.zip
+          name: Templar-Supreme-MGLRU-ZSTD-mayfly
+          path: Templar-Supreme-MGLRU-ZSTD-mayfly-*.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      # ─────────────────────────────────────────────
+      # 10. Build summary
+      # ─────────────────────────────────────────────
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "### 🏆 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel Version | ${KERNEL_VERSION:-5.10.264} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | Templar-LinuxStable |" >> $GITHUB_STEP_SUMMARY
+          echo "| Device | Xiaomi 12S (mayfly) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Features | MGLRU + ZSTD + KernelSU Next + SuSFS + BBRplus |" >> $GITHUB_STEP_SUMMARY
+          echo "| Artifact | ${ZIP_NAME:-N/A} |" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f kernel_src/out/arch/arm64/boot/Image ]; then
+            echo "| Status | ✅ SUCCESS |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Status | ❌ FAILED |" >> $GITHUB_STEP_SUMMARY
+          fi
