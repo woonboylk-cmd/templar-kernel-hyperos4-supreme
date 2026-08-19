@@ -1,0 +1,146 @@
+name: Build Templar-Ultimate V2.0 (mayfly)
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_STRING:
+        description: 'Kernel name suffix'
+        default: 'Templar-Ultimate-V2'
+        required: false
+
+env:
+  ARCH: arm64
+  KERNEL_SOURCE: https://github.com/Steambot12/Templar-Kernel-GKI-5.10
+  KERNEL_BRANCH: Templar-LinuxStable
+
+jobs:
+  build:
+    name: "Build Templar Ultimate V2.0 (5.10.264)"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: System Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libelf-dev libssl-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu pigz zip unzip \
+            curl wget python3 libncurses-dev gzip git
+
+      - name: Download ZyC Clang Toolchain
+        run: |
+          mkdir -p $HOME/toolchains/clang
+          wget -q --show-progress -O /tmp/clang.tar.gz \
+            "https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20220914-release/Clang-14.0.6-20220914.tar.gz"
+          tar -C $HOME/toolchains/clang -xzf /tmp/clang.tar.gz
+          echo "CLANG_DIR=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
+
+      - name: Clone Kernel Source & Integrate MGLRU
+        run: |
+          git config --global user.name "CI Builder"
+          git config --global user.email "ci@templar.local"
+          
+          echo "=== Cloning Templar-LinuxStable (5.10.264) ==="
+          git clone --depth=50 --branch Templar-LinuxStable \
+            https://github.com/Steambot12/Templar-Kernel-GKI-5.10 \
+            kernel_src
+          
+          cd kernel_src
+          echo "Base commit: $(git log --oneline -1)"
+          
+          # Fetch MGLRU branch from Steambot12
+          echo "=== Fetching Templar-MGLRU ==="
+          git fetch https://github.com/Steambot12/Templar-Kernel-GKI-5.10.git Templar-MGLRU:mglru_branch
+          
+          # Merge MGLRU cleanly
+          echo "=== Merging MGLRU ==="
+          git merge -m "Merge MGLRU from Steambot12" mglru_branch --allow-unrelated-histories -X theirs || {
+            echo "Merge had conflicts, resolving with theirs..."
+            git checkout --theirs .
+            git add .
+            git commit -m "Resolved MGLRU merge with theirs" || true
+          }
+          
+          echo "=== Verifying MGLRU in source ==="
+          grep -rn 'CONFIG_LRU_GEN' mm/ || echo "Checking mm/vmscan.c..."
+          ls -l mm/vmscan.c
+
+      - name: Bypass Module CRC Checks (Anti-Bootloop)
+        run: |
+          cd kernel_src
+          # Patch kernel/module.c to bypass symbol CRC verification for Xiaomi vendor modules
+          sed -i 's/if (!check_version(info, name, mod, crc))/if (0 \&\& !check_version(info, name, mod, crc))/g' kernel/module.c || true
+
+      - name: Configure Defconfig
+        run: |
+          cd kernel_src
+          DEF="arch/arm64/configs/gki_defconfig"
+          
+          # MGLRU
+          sed -i '/CONFIG_LRU_GEN/d' "$DEF"
+          cat << 'EOF' >> "$DEF"
+          CONFIG_LRU_GEN=y
+          CONFIG_LRU_GEN_ENABLED=y
+          CONFIG_LRU_GEN_STATS=y
+          CONFIG_ZSTD_COMPRESS=y
+          CONFIG_ZSTD_DECOMPRESS=y
+          CONFIG_ZSTD_COMMON=y
+          CONFIG_CRYPTO_ZSTD=y
+          CONFIG_RD_ZSTD=y
+          CONFIG_F2FS_FS_ZSTD=y
+          EOF
+          
+          # Set localversion
+          sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-Templar-Ultimate-V2"/' "$DEF"
+
+      - name: Compile Kernel
+        run: |
+          cd kernel_src
+          export PATH="$CLANG_DIR:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export READELF=llvm-readelf
+          export STRIP=llvm-strip
+          export LLVM=1
+          export LLVM_IAS=1
+          
+          make O=out gki_defconfig
+          make -j$(nproc --all) O=out Image Image.lz4 modules
+          
+          echo "=== Output check ==="
+          ls -la out/arch/arm64/boot/
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          cd AnyKernel3
+          
+          # Config AnyKernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          sed -i 's/block=boot/block=auto/g' anykernel.sh
+          sed -i 's/is_slot_device=0/is_slot_device=auto/g' anykernel.sh
+          
+          # Copy compiled kernel
+          cp ../kernel_src/out/arch/arm64/boot/Image .
+          [ -f ../kernel_src/out/arch/arm64/boot/Image.lz4 ] && cp ../kernel_src/out/arch/arm64/boot/Image.lz4 .
+          
+          # Create zip
+          ZIP_NAME="Templar-Ultimate-V2-MGLRU-ZSTD-mayfly.zip"
+          zip -r9 "$ZIP_NAME" * -x .git README.md *placeholder
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Templar-Ultimate-V2-mayfly
+          path: AnyKernel3/${{ env.ZIP_NAME }}
