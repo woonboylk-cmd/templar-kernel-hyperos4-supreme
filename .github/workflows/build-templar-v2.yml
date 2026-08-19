@@ -8,26 +8,28 @@ jobs:
     name: Build Templar Ultimate V2
     runs-on: ubuntu-22.04
     steps:
-      - name: 1. Set up Environment & Information
+      - name: 1. Environment Info
         run: |
           echo "=== BUILD START: Templar Ultimate Kernel V2.0 ==="
           echo "Target Device: Xiaomi 12S (mayfly / 2206123SC)"
           echo "Kernel Base: GKI 5.10.264 LTS + MGLRU Native Engine"
           df -h
 
-      - name: 2. System Dependencies & 16GB Swap Expansion
+      - name: 2. Toolchain Setup & Fast Swap
         run: |
-          echo "Expanding Swap to 16GB..."
-          sudo swapoff -a || true
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          echo "Allocating 8GB Fast Swap..."
+          sudo fallocate -l 8G /swapfile || true
+          if [ -f /swapfile ]; then
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          fi
           free -m
           
-          echo "Installing toolchain packages..."
+          echo "Installing toolchain packages non-interactively..."
+          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang-14 lld-14 llvm-14 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev bc bison flex make lz4 zip curl wget tar
+          sudo apt-get install -y -qq --no-install-recommends clang-14 lld-14 llvm-14 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev bc bison flex make lz4 zip curl wget tar
           
           echo "Configuring Clang-14 symlinks..."
           sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
@@ -41,13 +43,16 @@ jobs:
           clang --version
           ld.lld --version
 
-      - name: 3. Checkout Templar-MGLRU Kernel Source
-        uses: actions/checkout@v4
-        with:
-          repository: Steambot12/Templar-Kernel-GKI-5.10
-          ref: Templar-MGLRU
-          path: kernel_src
-          fetch-depth: 1
+      - name: 3. Download & Extract Templar-MGLRU Source
+        run: |
+          echo "Downloading Templar-MGLRU 179MB source tarball..."
+          wget -q --show-progress "https://codeload.github.com/Steambot12/Templar-Kernel-GKI-5.10/legacy.tar.gz/refs/heads/Templar-MGLRU" -O templar_mglru.tar.gz
+          echo "Extracting source tree..."
+          tar -xzf templar_mglru.tar.gz
+          mv Steambot12-Templar-Kernel-GKI-5.10-* kernel_src
+          rm -f templar_mglru.tar.gz
+          echo "Source tree extracted successfully into kernel_src."
+          ls -la kernel_src | head -n 10
 
       - name: 4. Align Version 264 & Bypass Module CRC Checks
         run: |
