@@ -66,8 +66,13 @@ jobs:
           wget -q --show-progress -O /tmp/clang.tar.gz "$CLANG_URL"
           
           if [ -f /tmp/clang.tar.gz ]; then
-            tar -C $HOME/toolchains/clang -xzf /tmp/clang.tar.gz --strip-components=1 2>/dev/null || \
-            tar -C $HOME/toolchains/clang -xzf /tmp/clang.tar.gz
+            mkdir -p /tmp/clang_ext
+            tar -C /tmp/clang_ext -xzf /tmp/clang.tar.gz
+            if [ -d /tmp/clang_ext/bin ]; then
+              mv /tmp/clang_ext/* $HOME/toolchains/clang/
+            else
+              mv /tmp/clang_ext/*/* $HOME/toolchains/clang/
+            fi
             echo "=== Clang version ==="
             $HOME/toolchains/clang/bin/clang --version || true
             echo "CLANG_DIR=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
