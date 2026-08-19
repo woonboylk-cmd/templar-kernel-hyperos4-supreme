@@ -26,7 +26,7 @@ jobs:
   build:
     name: "Build Kernel 5.10.264 MGLRU+ZSTD"
     runs-on: ubuntu-22.04
-    timeout-minutes: 150
+    timeout-minutes: 240
 
     steps:
       # ─────────────────────────────────────────────
@@ -242,7 +242,7 @@ jobs:
       # 7. Build Kernel Image
       # ─────────────────────────────────────────────
       - name: Build Kernel Image (Image + Image.lz4)
-        timeout-minutes: 90
+        timeout-minutes: 180
         run: |
           cd kernel_src
           CORES=$(nproc)
