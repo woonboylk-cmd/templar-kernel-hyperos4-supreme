@@ -16,20 +16,10 @@ jobs:
           df -h
           free -m
 
-      - name: 2. Setup 16GB Swap on /mnt & Toolchain
+      - name: 2. Setup Toolchain & Dependencies
         run: |
-          echo "Creating 16GB Swap on high-speed /mnt disk..."
-          sudo swapoff -a || true
-          sudo fallocate -l 16G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=16384
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          free -m
-          
-          echo "Installing toolchain packages non-interactively..."
-          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
+          sudo apt-get install -y --no-install-recommends \
             clang-14 lld-14 llvm-14 \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             libssl-dev libelf-dev bc bison flex make \
@@ -104,7 +94,7 @@ jobs:
           scripts/config --file arch/arm64/configs/gki_defconfig -e LRNG
           scripts/config --file arch/arm64/configs/gki_defconfig -e F2FS_FS
           
-          # Feature 7: ThinLTO (Optimized LTO link to prevent OOM crash)
+          # Feature 7: ThinLTO (Optimized parallel LTO linking, prevents FullLTO OOM)
           scripts/config --file arch/arm64/configs/gki_defconfig -d LTO_CLANG_FULL
           scripts/config --file arch/arm64/configs/gki_defconfig -e LTO_CLANG_THIN
           
