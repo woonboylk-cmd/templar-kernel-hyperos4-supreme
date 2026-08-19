@@ -14,24 +14,17 @@ jobs:
           echo "Target Device: Xiaomi 12S (mayfly / 2206123SC)"
           echo "Kernel Base: GKI 5.10.264 LTS + MGLRU Native Engine"
           df -h
-
-      - name: 2. Toolchain Setup & Fast Swap
-        run: |
-          echo "Allocating 8GB Fast Swap..."
-          sudo fallocate -l 8G /swapfile || true
-          if [ -f /swapfile ]; then
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
-            sudo swapon /swapfile
-          fi
           free -m
-          
-          echo "Installing toolchain packages non-interactively..."
-          export DEBIAN_FRONTEND=noninteractive
+
+      - name: 2. Setup Toolchain & Dependencies
+        run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends clang-14 lld-14 llvm-14 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev bc bison flex make lz4 zip curl wget tar
+          sudo apt-get install -y --no-install-recommends \
+            clang-14 lld-14 llvm-14 \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            libssl-dev libelf-dev bc bison flex make \
+            lz4 zip curl wget tar
           
-          echo "Configuring Clang-14 symlinks..."
           sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
           sudo ln -sf /usr/bin/lld-14 /usr/bin/ld.lld
           sudo ln -sf /usr/bin/llvm-ar-14 /usr/bin/llvm-ar
@@ -40,6 +33,7 @@ jobs:
           sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
           sudo ln -sf /usr/bin/llvm-readelf-14 /usr/bin/llvm-readelf
           sudo ln -sf /usr/bin/llvm-strip-14 /usr/bin/llvm-strip
+          
           clang --version
           ld.lld --version
 
