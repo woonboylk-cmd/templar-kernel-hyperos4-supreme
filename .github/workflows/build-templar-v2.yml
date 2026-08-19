@@ -41,24 +41,22 @@ jobs:
           clang --version
           ld.lld --version
 
-      - name: 3. Download Templar-MGLRU Source & Align Version 264
+      - name: 3. Checkout Templar-MGLRU Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: Steambot12/Templar-Kernel-GKI-5.10
+          ref: Templar-MGLRU
+          path: kernel_src
+          fetch-depth: 1
+
+      - name: 4. Align Version 264 & Bypass Module CRC Checks
         run: |
-          echo "Downloading Templar-MGLRU source tarball from GitHub codeload..."
-          curl -sL "https://codeload.github.com/Steambot12/Templar-Kernel-GKI-5.10/legacy.tar.gz/refs/heads/Templar-MGLRU" -o templar_mglru.tar.gz
-          echo "Downloaded $(du -h templar_mglru.tar.gz | cut -f1). Extracting..."
-          mkdir -p kernel_src
-          tar -xzf templar_mglru.tar.gz --strip-components=1 -C kernel_src
-          rm -f templar_mglru.tar.gz
-          
           cd kernel_src
           echo "Aligning SUBLEVEL to 264 in Makefile..."
           sed -i 's/SUBLEVEL = .*/SUBLEVEL = 264/' Makefile
           echo "Source aligned to SUBLEVEL $(grep '^SUBLEVEL = ' Makefile | awk '{print $3}')"
           head -n 5 Makefile
-
-      - name: 4. Bypass Module CRC Checks (Anti-Bootloop)
-        run: |
-          cd kernel_src
+          
           if [ -f kernel/module.c ]; then
             echo "Patching check_version in kernel/module.c to bypass module CRC checks..."
             sed -i 's/return check_version(info, symname, mod, crc);/return 1; \/\/ BYPASS_CRC/g' kernel/module.c
