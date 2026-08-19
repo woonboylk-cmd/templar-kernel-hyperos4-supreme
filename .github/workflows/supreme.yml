@@ -56,16 +56,14 @@ jobs:
           df -h
 
       # ─────────────────────────────────────────────
-      # 2. Download AOSP Clang (r450784e = Clang 14.0.6)
-      #    Compatible with XClang 22.1.2 ABI
+      # 2. Download ZyCromerZ Clang toolchain
       # ─────────────────────────────────────────────
-      - name: Download AOSP Clang toolchain
-        timeout-minutes: 20
+      - name: Download ZyCromerZ Clang toolchain
         run: |
           mkdir -p $HOME/toolchains/clang
-          echo "=== Downloading AOSP Clang r450784e ==="
-          # Use the Google-hosted prebuilt clang matching XClang 22.1.x
-          wget -q --show-progress -O /tmp/clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-5.10/clang-r450784e.tar.gz" || (echo "Fallback: use system clang" && exit 0)
+          echo "=== Downloading ZyCromerZ Clang ==="
+          CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260807-release/Clang-16.0.6-20260807.tar.gz"
+          wget -q --show-progress -O /tmp/clang.tar.gz "$CLANG_URL"
           
           if [ -f /tmp/clang.tar.gz ]; then
             tar -C $HOME/toolchains/clang -xzf /tmp/clang.tar.gz --strip-components=1 2>/dev/null || \
