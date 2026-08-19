@@ -35,7 +35,7 @@ jobs:
             bc bison flex libelf-dev libssl-dev \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu pigz zip unzip \
-            curl wget python3 libncurses-dev gzip git \
+            curl wget python3 libncurses-dev gzip git lz4 \
             clang-14 lld-14 llvm-14 clang lld llvm
 
       - name: Setup Compiler Toolchain
@@ -73,7 +73,7 @@ jobs:
           head -5 Makefile
           
           echo "=== Verifying MGLRU in source ==="
-          grep -rn 'CONFIG_LRU_GEN' mm/ || true
+          grep -rn 'LRU_GEN' mm/Kconfig || true
           ls -l mm/vmscan.c
 
       - name: Bypass Module CRC Checks (Anti-Bootloop)
@@ -124,7 +124,7 @@ jobs:
           export LLVM_IAS=1
           
           make O=out gki_defconfig
-          make -j$(nproc --all) O=out Image Image.lz4 modules
+          make -j$(nproc --all) O=out Image Image.lz4
           
           echo "=== Output check ==="
           ls -la out/arch/arm64/boot/
