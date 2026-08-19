@@ -22,7 +22,7 @@ jobs:
     steps:
       - name: System Dependencies & Swap Expansion
         run: |
-          echo "=== Expanding Swap Memory ==="
+          echo "=== Expanding Swap Memory to 16GB ==="
           sudo swapoff -a || true
           sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
           sudo chmod 600 /swapfile
@@ -37,16 +37,26 @@ jobs:
             binutils-aarch64-linux-gnu pigz zip unzip \
             curl wget python3 libncurses-dev gzip git
 
-      - name: Download ZyC Clang 16 Toolchain
+      - name: Download & Setup ZyC Clang 16 Toolchain
         run: |
-          mkdir -p $HOME/toolchains/clang
+          mkdir -p $HOME/toolchains/clang /tmp/clang_ext
           CLANG_URL="https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260807-release/Clang-16.0.6-20260807.tar.gz"
           echo "=== Downloading ZyC Clang 16 from $CLANG_URL ==="
           wget -q --show-progress -O /tmp/clang.tar.gz "$CLANG_URL"
-          tar -C $HOME/toolchains/clang -xzf /tmp/clang.tar.gz
-          echo "=== Clang version ==="
-          $HOME/toolchains/clang/bin/clang --version || true
+          
+          echo "=== Extracting Toolchain ==="
+          tar -C /tmp/clang_ext -xzf /tmp/clang.tar.gz
+          if [ -d /tmp/clang_ext/bin ]; then
+            cp -r /tmp/clang_ext/* $HOME/toolchains/clang/
+          else
+            cp -r /tmp/clang_ext/*/* $HOME/toolchains/clang/
+          fi
+          
+          echo "=== Verifying Clang Version ==="
+          $HOME/toolchains/clang/bin/clang --version
+          $HOME/toolchains/clang/bin/ld.lld --version
           echo "CLANG_DIR=$HOME/toolchains/clang/bin" >> $GITHUB_ENV
+          echo "$HOME/toolchains/clang/bin" >> $GITHUB_PATH
 
       - name: Clone Kernel Source & Integrate MGLRU
         run: |
@@ -89,7 +99,7 @@ jobs:
           cd kernel_src
           DEF="arch/arm64/configs/gki_defconfig"
           
-          # MGLRU
+          # MGLRU & ZSTD
           sed -i '/CONFIG_LRU_GEN/d' "$DEF"
           cat << 'EOF' >> "$DEF"
           CONFIG_LRU_GEN=y
