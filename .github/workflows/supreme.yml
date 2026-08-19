@@ -32,6 +32,14 @@ jobs:
       # ─────────────────────────────────────────────
       # 0. Checkout CI repo (for kernel.config, patches)
       # ─────────────────────────────────────────────
+      - name: Free Disk Space & Create Swap (For LTO)
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
       - name: Checkout CI repo
         uses: actions/checkout@v4
         with:
