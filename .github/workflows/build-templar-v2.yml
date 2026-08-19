@@ -11,11 +11,11 @@ on:
 env:
   ARCH: arm64
   KERNEL_SOURCE: https://github.com/Steambot12/Templar-Kernel-GKI-5.10
-  KERNEL_BRANCH: Templar-LinuxStable
+  KERNEL_BRANCH: Templar-MGLRU
 
 jobs:
   build:
-    name: "Build Templar Ultimate V2.0 (5.10.264)"
+    name: "Build Templar Ultimate V2.0 MGLRU (5.10.264)"
     runs-on: ubuntu-22.04
     timeout-minutes: 180
 
@@ -60,40 +60,26 @@ jobs:
           echo "CLANG_DIR=$HOME/toolchains/bin" >> $GITHUB_ENV
           echo "$HOME/toolchains/bin" >> $GITHUB_PATH
 
-      - name: Clone Kernel Source & Integrate MGLRU
+      - name: Clone Templar-MGLRU Source & Align Version 264
         run: |
-          git config --global user.name "CI Builder"
-          git config --global user.email "ci@templar.local"
-          
-          echo "=== Cloning Templar-LinuxStable (5.10.264) ==="
-          git clone --depth=50 --branch Templar-LinuxStable \
+          echo "=== Cloning Native MGLRU Branch ==="
+          git clone --depth=1 --branch Templar-MGLRU \
             https://github.com/Steambot12/Templar-Kernel-GKI-5.10 \
             kernel_src
           
           cd kernel_src
-          echo "Base commit: $(git log --oneline -1)"
-          
-          # Fetch MGLRU branch from Steambot12
-          echo "=== Fetching Templar-MGLRU ==="
-          git fetch https://github.com/Steambot12/Templar-Kernel-GKI-5.10.git Templar-MGLRU:mglru_branch
-          
-          # Merge MGLRU cleanly
-          echo "=== Merging MGLRU ==="
-          git merge -m "Merge MGLRU from Steambot12" mglru_branch --allow-unrelated-histories -X theirs || {
-            echo "Merge had conflicts, resolving with theirs..."
-            git checkout --theirs .
-            git add .
-            git commit -m "Resolved MGLRU merge with theirs" || true
-          }
+          echo "=== Aligning SUBLEVEL to 264 for Vendor ABI match ==="
+          sed -i 's/SUBLEVEL = .*/SUBLEVEL = 264/' Makefile
+          head -5 Makefile
           
           echo "=== Verifying MGLRU in source ==="
-          grep -rn 'CONFIG_LRU_GEN' mm/ || echo "Checking mm/vmscan.c..."
+          grep -rn 'CONFIG_LRU_GEN' mm/ || true
           ls -l mm/vmscan.c
 
       - name: Bypass Module CRC Checks (Anti-Bootloop)
         run: |
           cd kernel_src
-          # Patch kernel/module.c to bypass symbol CRC verification for Xiaomi vendor modules
+          # Ensure module CRC checks are completely ignored for vendor compatibility
           sed -i 's/if (!check_version(info, name, mod, crc))/if (0 \&\& !check_version(info, name, mod, crc))/g' kernel/module.c || true
 
       - name: Configure Defconfig
@@ -101,7 +87,7 @@ jobs:
           cd kernel_src
           DEF="arch/arm64/configs/gki_defconfig"
           
-          # MGLRU & ZSTD
+          # Enable MGLRU & ZSTD
           sed -i '/CONFIG_LRU_GEN/d' "$DEF"
           cat << 'EOF' >> "$DEF"
           CONFIG_LRU_GEN=y
