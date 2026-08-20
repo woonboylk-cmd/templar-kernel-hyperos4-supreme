@@ -62,7 +62,7 @@ jobs:
           
           if [ -f kernel/module.c ]; then
             echo "Injecting MGLRU Shield into kernel/module.c check_version..."
-            python3 -c '
+            cat << 'EOF' > patch_shield.py
 with open("kernel/module.c", "r") as f:
     content = f.read()
 
@@ -72,21 +72,25 @@ if idx != -1:
     body_start = content.find("{", idx)
     body_end = content.find("}", body_start)
     shield_code = """{
-\tif (info && info->name) {
-\t\tif (strstr(info->name, "millet") || strstr(info->name, "migt") ||
-\t\t    strstr(info->name, "mi_freqwdg") || strstr(info->name, "perf_helper") ||
-\t\t    strstr(info->name, "binder_prio")) {
-\t\t\tpr_info("MGLRU Shield: Safely rejected incompatible Xiaomi module %s\\n", info->name);
-\t\t\treturn 0;
-\t\t}
-\t}
-\treturn 1;
+	if (info && info->name) {
+		if (strstr(info->name, "millet") || strstr(info->name, "migt") ||
+		    strstr(info->name, "mi_freqwdg") || strstr(info->name, "perf_helper") ||
+		    strstr(info->name, "binder_prio")) {
+			pr_info("MGLRU Shield: Safely rejected incompatible Xiaomi module %s\\n", info->name);
+			return 0;
+		}
+	}
+	return 1;
 }"""
     content = content[:body_start] + shield_code + content[body_end+1:]
     with open("kernel/module.c", "w") as f:
         f.write(content)
     print("MGLRU Shield injected successfully!")
-'
+else:
+    print("check_version signature not found")
+EOF
+            python3 patch_shield.py
+            rm -f patch_shield.py
             grep -A 15 "static int check_version" kernel/module.c || true
           fi
 
