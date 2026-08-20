@@ -1,4 +1,4 @@
-name: Build Templar Supreme V2.2 (MGLRU Shield Core + ZSTD)
+name: Build Templar Supreme V2.3 (MGLRU Shield Final + ZSTD)
 
 on:
   workflow_dispatch:
@@ -8,18 +8,17 @@ on:
 
 jobs:
   build:
-    name: Build Templar Supreme V2.2
+    name: Build Templar Supreme V2.3
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
       - name: 1. Environment Info & Cleanup
         run: |
-          echo "=== BUILD START: Templar Ultimate Kernel V2.2 ==="
+          echo "=== BUILD START: Templar Ultimate Kernel V2.3 ==="
           echo "Target Device: Xiaomi 12S (mayfly / 2206123SC)"
-          echo "Kernel Base: GKI 5.10.264 LTS + MGLRU Shield at load_module"
+          echo "Kernel Base: GKI 5.10.264 LTS + Targeted Millet Shield"
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
           df -h
-          free -m
 
       - name: 2. Setup Toolchain & Dependencies
         run: |
@@ -51,18 +50,17 @@ jobs:
           tar -xzf templar_mglru.tar.gz
           mv Steambot12-Templar-Kernel-GKI-5.10-* kernel_src
           rm -f templar_mglru.tar.gz
-          echo "Source tree extracted successfully into kernel_src."
 
-      - name: 4. Align SUBLEVEL 264 & Inject MGLRU Shield into load_module
+      - name: 4. Align SUBLEVEL 264 & Inject Targeted Millet Shield
         run: |
           cd kernel_src
           echo "Aligning SUBLEVEL to 264 in Makefile..."
           sed -i 's/SUBLEVEL = .*/SUBLEVEL = 264/' Makefile
           head -n 5 Makefile
           
-          echo "Applying MGLRU Shield patch directly to kernel/module.c..."
+          echo "Applying Targeted Millet Shield patch directly to kernel/module.c..."
           sed -i '/err = setup_load_info(info, flags);/{n;N;d}' kernel/module.c
-          sed -i '/err = setup_load_info(info, flags);/a \\tif (err)\n\t\tgoto free_copy;\n\tif (info->name && (strstr(info->name, "millet") || strstr(info->name, "migt") || strstr(info->name, "mi_freqwdg") || strstr(info->name, "perf_helper") || strstr(info->name, "binder_prio"))) {\n\t\tpr_info("MGLRU Shield: Safely rejected incompatible Xiaomi module %s\\n", info->name);\n\t\terr = -ENOEXEC;\n\t\tgoto free_copy;\n\t}' kernel/module.c
+          sed -i '/err = setup_load_info(info, flags);/a \\tif (err)\n\t\tgoto free_copy;\n\tif (info->name && strstr(info->name, "millet")) {\n\t\tpr_info("MGLRU Shield: Safely rejected incompatible Xiaomi module %s\\n", info->name);\n\t\terr = -ENOEXEC;\n\t\tgoto free_copy;\n\t}' kernel/module.c
           
           grep -C 10 "MGLRU Shield" kernel/module.c
 
@@ -87,7 +85,7 @@ jobs:
           scripts/config --file arch/arm64/configs/gki_defconfig -e LTO_CLANG_THIN
           
           # Kernel String
-          scripts/config --file arch/arm64/configs/gki_defconfig --set-str LOCALVERSION "-Templar-Ultimate-V2.2-MGLRU"
+          scripts/config --file arch/arm64/configs/gki_defconfig --set-str LOCALVERSION "-Templar-Ultimate-V2.3-MGLRU"
           
           echo "Defconfig prepared."
 
@@ -122,12 +120,12 @@ jobs:
           sed -i 's/write_boot;/flash_boot;/' anykernel.sh
           
           cp ../kernel_src/out/arch/arm64/boot/Image .
-          zip -r9 ../Templar-Ultimate-V2.2-MGLRU-Shield-mayfly.zip * -x .git README.md *placeholder
-          ls -lh ../Templar-Ultimate-V2.2-MGLRU-Shield-mayfly.zip
+          zip -r9 ../Templar-Ultimate-V2.3-MGLRU-Shield-mayfly.zip * -x .git README.md *placeholder
+          ls -lh ../Templar-Ultimate-V2.3-MGLRU-Shield-mayfly.zip
 
       - name: 8. Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Templar-Ultimate-V2.2-MGLRU-Shield-mayfly
-          path: Templar-Ultimate-V2.2-MGLRU-Shield-mayfly.zip
+          name: Templar-Ultimate-V2.3-MGLRU-Shield-mayfly
+          path: Templar-Ultimate-V2.3-MGLRU-Shield-mayfly.zip
           retention-days: 7
