@@ -1,23 +1,24 @@
-name: Build Templar Ultimate Kernel V2.0 (MGLRU + ZSTD + 8 Core Tech)
+name: Build Templar Ultimate Kernel V2.1 (MGLRU Shield + ZSTD + 8 Core Tech)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Templar Ultimate V2
+    name: Build Templar Ultimate V2.1
     runs-on: ubuntu-22.04
     steps:
       - name: 1. Environment Info
         run: |
-          echo "=== BUILD START: Templar Ultimate Kernel V2.0 ==="
+          echo "=== BUILD START: Templar Ultimate Kernel V2.1 ==="
           echo "Target Device: Xiaomi 12S (mayfly / 2206123SC)"
-          echo "Kernel Base: GKI 5.10.264 LTS + MGLRU Native Engine"
+          echo "Kernel Base: GKI 5.10.264 LTS + MGLRU Shield Native Engine"
           df -h
           free -m
 
       - name: 2. Setup Toolchain & Dependencies
         run: |
+          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             clang-14 lld-14 llvm-14 \
@@ -48,7 +49,7 @@ jobs:
           echo "Source tree extracted successfully into kernel_src."
           ls -la kernel_src | head -n 10
 
-      - name: 4. Align Version 264 & Bypass Module CRC Checks
+      - name: 4. Align Version 264 & Inject MGLRU Shield
         run: |
           cd kernel_src
           echo "Aligning SUBLEVEL to 264 in Makefile..."
@@ -57,10 +58,36 @@ jobs:
           head -n 5 Makefile
           
           if [ -f kernel/module.c ]; then
-            echo "Patching check_version in kernel/module.c to bypass module CRC checks..."
-            sed -i 's/return check_version(info, symname, mod, crc);/return 1; \/\/ BYPASS_CRC/g' kernel/module.c
-            echo "Patch applied successfully:"
-            grep -n "BYPASS_CRC" kernel/module.c || true
+            echo "Injecting MGLRU Shield into kernel/module.c check_version..."
+            python3 -c '
+with open("kernel/module.c", "r") as f:
+    content = f.read()
+
+# Replace check_version logic with MGLRU Shield filter
+old_sig = "static int check_version(const struct load_info *info,"
+idx = content.find(old_sig)
+if idx != -1:
+    body_start = content.find("{", idx)
+    body_end = content.find("}", body_start)
+    shield_code = """{
+	if (info && info->name) {
+		if (strstr(info->name, "millet") || strstr(info->name, "migt") ||
+		    strstr(info->name, "mi_freqwdg") || strstr(info->name, "perf_helper") ||
+		    strstr(info->name, "binder_prio")) {
+			pr_info("MGLRU Shield: Safely rejected incompatible Xiaomi module %s\\n", info->name);
+			return 0; /* Reject loading conflicting module */
+		}
+	}
+	return 1; /* Bypass CRC for essential hardware vendor modules */
+}"""
+    content = content[:body_start] + shield_code + content[body_end+1:]
+    with open("kernel/module.c", "w") as f:
+        f.write(content)
+    print("MGLRU Shield injected successfully into kernel/module.c!")
+else:
+    print("Warning: check_version signature not found")
+'
+            grep -A 15 "static int check_version" kernel/module.c || true
           fi
 
       - name: 5. Configure Defconfig & 8 Core Features
@@ -94,12 +121,12 @@ jobs:
           scripts/config --file arch/arm64/configs/gki_defconfig -e LRNG
           scripts/config --file arch/arm64/configs/gki_defconfig -e F2FS_FS
           
-          # Feature 7: ThinLTO (Optimized parallel LTO linking, prevents FullLTO OOM)
+          # Feature 7: ThinLTO
           scripts/config --file arch/arm64/configs/gki_defconfig -d LTO_CLANG_FULL
           scripts/config --file arch/arm64/configs/gki_defconfig -e LTO_CLANG_THIN
           
           # Kernel String Branding
-          scripts/config --file arch/arm64/configs/gki_defconfig --set-str LOCALVERSION "-Templar-Ultimate-V2"
+          scripts/config --file arch/arm64/configs/gki_defconfig --set-str LOCALVERSION "-Templar-Ultimate-V2.1-MGLRU"
           
           echo "Defconfig preparation finished."
 
@@ -130,23 +157,45 @@ jobs:
           
           ls -lh out/arch/arm64/boot/Image
 
-      - name: 7. Package with AnyKernel3
+      - name: 7. Package with AnyKernel3 (GKI Configured)
         run: |
           echo "Cloning AnyKernel3..."
           git clone https://github.com/osm0sis/AnyKernel3.git AK3
           cd AK3
           
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
-          sed -i 's/block=auto;/block=boot;/' anykernel.sh
-          sed -i 's/is_slot_device=0;/is_slot_device=auto;/' anykernel.sh
+          cat << 'EOF' > anykernel.sh
+          ### AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+          properties() { '
+          kernel.string=Templar Ultimate V2.1 (MGLRU Shield + ZSTD) by woonboy
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=mayfly
+          device.name2=2206123SC
+          device.name3=2206123SG
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+          block=boot;
+          is_slot_device=auto;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          . tools/ak3-core.sh;
+          split_boot;
+          flash_boot;
+          EOF
           
           cp ../kernel_src/out/arch/arm64/boot/Image .
-          zip -r9 ../Templar-Ultimate-V2-MGLRU-ZSTD-mayfly.zip * -x .git README.md *placeholder
-          ls -lh ../Templar-Ultimate-V2-MGLRU-ZSTD-mayfly.zip
+          zip -r9 ../Templar-Ultimate-V2.1-MGLRU-Shield-mayfly.zip * -x .git README.md *placeholder
+          ls -lh ../Templar-Ultimate-V2.1-MGLRU-Shield-mayfly.zip
 
       - name: 8. Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Templar-Ultimate-V2-mayfly
-          path: Templar-Ultimate-V2-MGLRU-ZSTD-mayfly.zip
+          name: Templar-Ultimate-V2.1-MGLRU-Shield-mayfly
+          path: Templar-Ultimate-V2.1-MGLRU-Shield-mayfly.zip
           retention-days: 7
