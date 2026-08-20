@@ -2,6 +2,9 @@ name: Build Templar Ultimate Kernel V2.1 (MGLRU Shield + ZSTD + 8 Core Tech)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
