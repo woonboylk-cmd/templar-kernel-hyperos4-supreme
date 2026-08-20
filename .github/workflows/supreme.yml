@@ -1,4 +1,4 @@
-name: Build Templar Supreme V2.3 (MGLRU Shield Final + ZSTD)
+name: Build Templar Supreme V3.0 (Pure Clean Base + MGLRU + ZSTD)
 
 on:
   workflow_dispatch:
@@ -8,15 +8,15 @@ on:
 
 jobs:
   build:
-    name: Build Templar Supreme V2.3
+    name: Build Templar Supreme V3.0 Clean
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
       - name: 1. Environment Info & Cleanup
         run: |
-          echo "=== BUILD START: Templar Ultimate Kernel V2.3 ==="
+          echo "=== BUILD START: Templar Ultimate Kernel V3.0 Clean ==="
           echo "Target Device: Xiaomi 12S (mayfly / 2206123SC)"
-          echo "Kernel Base: GKI 5.10.264 LTS + Targeted Millet Shield"
+          echo "Kernel Base: GKI 5.10.264 LTS + Pure Steambot12 Base + MGLRU + ZSTD"
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
           df -h
 
@@ -51,20 +51,14 @@ jobs:
           mv Steambot12-Templar-Kernel-GKI-5.10-* kernel_src
           rm -f templar_mglru.tar.gz
 
-      - name: 4. Align SUBLEVEL 264 & Inject Targeted Millet Shield
+      - name: 4. Align SUBLEVEL 264 (Preserving 100% Pure Architecture)
         run: |
           cd kernel_src
           echo "Aligning SUBLEVEL to 264 in Makefile..."
           sed -i 's/SUBLEVEL = .*/SUBLEVEL = 264/' Makefile
           head -n 5 Makefile
-          
-          echo "Applying Targeted Millet Shield patch directly to kernel/module.c..."
-          sed -i '/err = setup_load_info(info, flags);/{n;N;d}' kernel/module.c
-          sed -i '/err = setup_load_info(info, flags);/a \\tif (err)\n\t\tgoto free_copy;\n\tif (info->name && strstr(info->name, "millet")) {\n\t\tpr_info("MGLRU Shield: Safely rejected incompatible Xiaomi module %s\\n", info->name);\n\t\terr = -ENOEXEC;\n\t\tgoto free_copy;\n\t}' kernel/module.c
-          
-          grep -C 10 "MGLRU Shield" kernel/module.c
 
-      - name: 5. Configure Defconfig
+      - name: 5. Configure Defconfig (MGLRU + ZSTD + ThinLTO)
         run: |
           cd kernel_src
           echo "Injecting features into arch/arm64/configs/gki_defconfig..."
@@ -85,7 +79,7 @@ jobs:
           scripts/config --file arch/arm64/configs/gki_defconfig -e LTO_CLANG_THIN
           
           # Kernel String
-          scripts/config --file arch/arm64/configs/gki_defconfig --set-str LOCALVERSION "-Templar-Ultimate-V2.3-MGLRU"
+          scripts/config --file arch/arm64/configs/gki_defconfig --set-str LOCALVERSION "-Templar-Supreme-V3.0-Clean"
           
           echo "Defconfig prepared."
 
@@ -120,12 +114,12 @@ jobs:
           sed -i 's/write_boot;/flash_boot;/' anykernel.sh
           
           cp ../kernel_src/out/arch/arm64/boot/Image .
-          zip -r9 ../Templar-Ultimate-V2.3-MGLRU-Shield-mayfly.zip * -x .git README.md *placeholder
-          ls -lh ../Templar-Ultimate-V2.3-MGLRU-Shield-mayfly.zip
+          zip -r9 ../Templar-Supreme-V3.0-Clean-mayfly.zip * -x .git README.md *placeholder
+          ls -lh ../Templar-Supreme-V3.0-Clean-mayfly.zip
 
       - name: 8. Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Templar-Ultimate-V2.3-MGLRU-Shield-mayfly
-          path: Templar-Ultimate-V2.3-MGLRU-Shield-mayfly.zip
+          name: Templar-Supreme-V3.0-Clean-mayfly
+          path: Templar-Supreme-V3.0-Clean-mayfly.zip
           retention-days: 7
