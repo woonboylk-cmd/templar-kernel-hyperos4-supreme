@@ -29,7 +29,7 @@ jobs:
             clang-14 lld-14 llvm-14 \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             libssl-dev libelf-dev bc bison flex make \
-            lz4 zip curl wget tar python3
+            lz4 zip curl wget tar
           
           sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
           sudo ln -sf /usr/bin/lld-14 /usr/bin/ld.lld
@@ -60,25 +60,11 @@ jobs:
           sed -i 's/SUBLEVEL = .*/SUBLEVEL = 264/' Makefile
           head -n 5 Makefile
           
-          cat << 'EOF' > patch_shield.py
-with open("kernel/module.c", "r") as f:
-    c = f.read()
-
-target = "err = setup_load_info(info, flags);\n\tif (err)\n\t\tgoto free_copy;\n"
-replacement = "err = setup_load_info(info, flags);\n\tif (err)\n\t\tgoto free_copy;\n\n\tif (info->name && (strstr(info->name, \"millet\") || strstr(info->name, \"migt\") || strstr(info->name, \"mi_freqwdg\") || strstr(info->name, \"perf_helper\") || strstr(info->name, \"binder_prio\"))) {\n\t\tpr_info(\"MGLRU Shield: Safely rejected incompatible Xiaomi module %s\\n\", info->name);\n\t\terr = -ENOEXEC;\n\t\tgoto free_copy;\n\t}\n"
-
-if target in c:
-    c = c.replace(target, replacement, 1)
-    with open("kernel/module.c", "w") as f:
-        f.write(c)
-    print("SUCCESS: Injected MGLRU Shield directly into load_module!")
-else:
-    print("ERROR: Target not found in kernel/module.c")
-    exit(1)
-EOF
-          python3 patch_shield.py
-          rm -f patch_shield.py
-          grep -A 15 "MGLRU Shield" kernel/module.c
+          echo "Applying MGLRU Shield patch directly to kernel/module.c..."
+          sed -i '/err = setup_load_info(info, flags);/{n;N;d}' kernel/module.c
+          sed -i '/err = setup_load_info(info, flags);/a \\tif (err)\n\t\tgoto free_copy;\n\tif (info->name && (strstr(info->name, "millet") || strstr(info->name, "migt") || strstr(info->name, "mi_freqwdg") || strstr(info->name, "perf_helper") || strstr(info->name, "binder_prio"))) {\n\t\tpr_info("MGLRU Shield: Safely rejected incompatible Xiaomi module %s\\n", info->name);\n\t\terr = -ENOEXEC;\n\t\tgoto free_copy;\n\t}' kernel/module.c
+          
+          grep -C 10 "MGLRU Shield" kernel/module.c
 
       - name: 5. Configure Defconfig
         run: |
@@ -129,28 +115,11 @@ EOF
           git clone https://github.com/osm0sis/AnyKernel3.git AK3
           cd AK3
           
-          cat << 'EOF' > anykernel.sh
-          ### AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
-          properties() { '
-          kernel.string=Templar Ultimate V2.2 (MGLRU Shield + ZSTD) by woonboy
-          do.devicecheck=0
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=mayfly
-          device.name2=2206123SC
-          device.name3=2206123SG
-          '; }
-          block=boot;
-          is_slot_device=auto;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
-          . tools/ak3-core.sh;
-          split_boot;
-          flash_boot;
-          EOF
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
+          sed -i 's/BLOCK=.*/block=boot;/' anykernel.sh
+          sed -i 's/IS_SLOT_DEVICE=.*/is_slot_device=auto;/' anykernel.sh
+          sed -i 's/dump_boot;/split_boot;/' anykernel.sh
+          sed -i 's/write_boot;/flash_boot;/' anykernel.sh
           
           cp ../kernel_src/out/arch/arm64/boot/Image .
           zip -r9 ../Templar-Ultimate-V2.2-MGLRU-Shield-mayfly.zip * -x .git README.md *placeholder
