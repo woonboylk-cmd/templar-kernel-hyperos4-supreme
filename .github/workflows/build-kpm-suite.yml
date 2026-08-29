@@ -24,10 +24,12 @@ jobs:
           mkdir -p KernelPatch/kpms/pixel11-spoofer
           mkdir -p KernelPatch/kpms/zstd-engine
           mkdir -p KernelPatch/kpms/susfs-stealth
+          mkdir -p KernelPatch/kpms/netshield-supreme
 
           cp kpms_src/pixel11_camera_safe_spoofer.c KernelPatch/kpms/pixel11-spoofer/pixel11.c
           cp kpms_src/zstd_memory_engine.c KernelPatch/kpms/zstd-engine/zstd.c
           cp kpms_src/susfs_stealth_root.c KernelPatch/kpms/susfs-stealth/susfs.c
+          cp kpms_src/ring0_netshield_supreme.c KernelPatch/kpms/netshield-supreme/netshield.c
 
           cat << 'EOF' > KernelPatch/kpms/pixel11-spoofer/Makefile
           TARGET_COMPILE ?= aarch64-linux-gnu-
@@ -68,16 +70,31 @@ jobs:
           	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -O2 -o $@ $<
           EOF
 
+          cat << 'EOF' > KernelPatch/kpms/netshield-supreme/Makefile
+          TARGET_COMPILE ?= aarch64-linux-gnu-
+          KP_DIR ?= ../..
+          CC = $(TARGET_COMPILE)gcc
+          INCLUDE_DIRS := . include patch/include linux/include linux/arch/arm64/include linux/tools/arch/arm64/include
+          INCLUDE_FLAGS := $(foreach dir,$(INCLUDE_DIRS),-I$(KP_DIR)/kernel/$(dir))
+          all: ring0-netshield-supreme.kpm
+          ring0-netshield-supreme.kpm: netshield.o
+          	${CC} -r -o $@ $^
+          %.o: %.c
+          	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -O2 -o $@ $<
+          EOF
+
       - name: Compile KPM Modules
         run: |
           make -C KernelPatch/kpms/pixel11-spoofer
           make -C KernelPatch/kpms/zstd-engine
           make -C KernelPatch/kpms/susfs-stealth
+          make -C KernelPatch/kpms/netshield-supreme
 
           mkdir -p $GITHUB_WORKSPACE/output_kpms
           cp KernelPatch/kpms/pixel11-spoofer/pixel11-camera-safe-spoofer.kpm $GITHUB_WORKSPACE/output_kpms/
           cp KernelPatch/kpms/zstd-engine/zstd-memory-engine.kpm $GITHUB_WORKSPACE/output_kpms/
           cp KernelPatch/kpms/susfs-stealth/susfs-stealth-root.kpm $GITHUB_WORKSPACE/output_kpms/
+          cp KernelPatch/kpms/netshield-supreme/ring0-netshield-supreme.kpm $GITHUB_WORKSPACE/output_kpms/
           ls -la $GITHUB_WORKSPACE/output_kpms/
 
       - name: Upload KPM Artifacts
