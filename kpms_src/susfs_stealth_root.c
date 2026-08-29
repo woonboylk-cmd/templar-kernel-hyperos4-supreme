@@ -7,13 +7,13 @@
 
 #include <compiler.h>
 #include <kpmodule.h>
+#include <kallsyms.h>
+#include <hook.h>
 #include <linux/printk.h>
 #include <uapi/asm-generic/unistd.h>
 #include <linux/uaccess.h>
 #include <syscall.h>
 #include <linux/string.h>
-#include <kputils.h>
-#include <asm/current.h>
 
 KPM_NAME("susfs-stealth-root");
 KPM_VERSION("2.0.0");
@@ -32,20 +32,6 @@ static const char *sus_patterns[] = {
 };
 
 void before_openat_susfs(hook_fargs4_t *args, void *udata) {
-    const char __user *filename = (typeof(filename))syscall_argn(args, 1);
-    char buf[256];
-    
-    if (!filename) return;
-    
-    long len = compat_strncpy_from_user(buf, filename, sizeof(buf) - 1);
-    if (len <= 0) return;
-    buf[sizeof(buf) - 1] = '\0';
-
-    for (int i = 0; i < sizeof(sus_patterns) / sizeof(sus_patterns[0]); i++) {
-        if (strstr(buf, sus_patterns[i])) {
-            return;
-        }
-    }
 }
 
 static long susfs_stealth_init(const char *args, const char *event, void *__user reserved) {
