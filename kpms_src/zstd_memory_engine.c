@@ -7,13 +7,13 @@
 
 #include <compiler.h>
 #include <kpmodule.h>
+#include <kallsyms.h>
+#include <hook.h>
 #include <linux/printk.h>
 #include <uapi/asm-generic/unistd.h>
 #include <linux/uaccess.h>
 #include <syscall.h>
 #include <linux/string.h>
-#include <kputils.h>
-#include <asm/current.h>
 
 KPM_NAME("zstd-memory-engine");
 KPM_VERSION("2.0.0");
