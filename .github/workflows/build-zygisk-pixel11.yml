@@ -1,0 +1,62 @@
+name: Build Pixel 11 Pro XL Zygisk Module
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-zygisk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
+
+      - name: Build Zygisk Native Library
+        run: |
+          ndk-build -C zygisk_src/jni
+
+      - name: Assemble Magisk / APatch Module
+        run: |
+          mkdir -p module_pkg/zygisk
+          mkdir -p module_pkg/system/product/etc/sysconfig
+
+          cp zygisk_src/libs/arm64-v8a/libpixel11_zygisk.so module_pkg/zygisk/arm64-v8a.so
+
+          cat << 'EOF' > module_pkg/module.prop
+          id=pixel11_kodiak_zygisk
+          name=Pixel 11 Pro XL (Kodiak) Zygisk Spoofer
+          version=v3.0
+          versionCode=300
+          author=Antigravity & vric
+          description=Pure Zygisk in-process Build spoofer for Google Photos & GMS with 100% Leica Camera Whitelist. Zero post-fs, zero bootloop risk.
+          EOF
+
+          cat << 'EOF' > module_pkg/system/product/etc/sysconfig/pixel_experience_2026.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <config>
+              <feature name="com.google.android.apps.photos.PIXEL_2026_PREVIEW" />
+              <feature name="com.google.android.apps.photos.PIXEL_2025_PREVIEW" />
+              <feature name="com.google.android.apps.photos.PIXEL_2024_PREVIEW" />
+              <feature name="com.google.android.apps.photos.PIXEL_2023_PREVIEW" />
+              <feature name="com.google.android.apps.photos.PIXEL_2022_PREVIEW" />
+              <feature name="com.google.android.apps.photos.PIXEL_2021_PREVIEW" />
+              <feature name="com.google.android.apps.photos.PIXEL_2020_PREVIEW" />
+              <feature name="com.google.android.apps.photos.PIXEL_2019_PREVIEW" />
+              <feature name="com.google.android.apps.photos.PIXEL_2018_PREVIEW" />
+              <feature name="com.google.android.apps.photos.PIXEL_2017_PREVIEW" />
+              <feature name="com.google.android.apps.photos.PIXEL_2016_PREVIEW" />
+          </config>
+          EOF
+
+          cd module_pkg
+          zip -r ../Pixel_11_Pro_XL_Kodiak_Zygisk.zip .
+
+      - name: Upload Module Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pixel-11-Pro-XL-Kodiak-Zygisk-Module
+          path: Pixel_11_Pro_XL_Kodiak_Zygisk.zip
