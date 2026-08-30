@@ -28,7 +28,7 @@ static const char *P_TAGS = "release-keys";
 static const char *P_HOST = "r-36404f8caf3535e4-26ss";
 static const char *P_USER = "android-build";
 
-/* Camera Whitelist (Zero Touch) */
+/* Camera Whitelist (Zero Touch - Always Protected) */
 static const char *camera_whitelist[] = {
     "com.android.camera",
     "com.xiaomi.vtcamera",
@@ -48,14 +48,12 @@ static bool is_whitelisted_camera(const char *pkg) {
     return false;
 }
 
+/* Match ALL Google Ecosystem Apps */
 static bool is_target_app(const char *pkg) {
     if (!pkg) return false;
-    if (strstr(pkg, "com.google.android.apps.photos") ||
-        strstr(pkg, "com.google.android.gms") ||
-        strstr(pkg, "com.google.android.gsf") ||
-        strstr(pkg, "com.google.android.googlequicksearchbox") ||
-        strstr(pkg, "com.google.android.apps.bard") ||
-        strstr(pkg, "com.google.android.apps.gemini")) {
+    if (strstr(pkg, "com.google.") || 
+        strstr(pkg, "com.android.vending") ||
+        strstr(pkg, "com.google.android.")) {
         return true;
     }
     return false;
@@ -108,7 +106,7 @@ static void spoof_build_fields(JNIEnv *env) {
     }
 }
 
-/* PLT Hook for __system_property_get in native code (WebView, Chromium, AdMob) */
+/* PLT Hook for __system_property_get in native code */
 static int (*orig_system_property_get)(const char *name, char *value) = nullptr;
 
 static int my_system_property_get(const char *name, char *value) {
@@ -175,9 +173,8 @@ public:
                 enable_spoof = false;
             } else if (is_target_app(process_name)) {
                 enable_spoof = true;
-                LOGI("Target detected: %s -> Enforcing Pixel 11 Pro XL (CD1A.260714.001.A9)", process_name);
+                LOGI("Target Google app detected: %s -> Enforcing Pixel 11 Pro XL (CD1A.260714.001.A9)", process_name);
 
-                // Register PLT Hook for native libraries inside target process
                 if (api && api->pltHookRegister) {
                     api->pltHookRegister(".*", "__system_property_get", (void *)my_system_property_get, (void **)&orig_system_property_get);
                 }
@@ -188,13 +185,11 @@ public:
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         if (enable_spoof && env) {
-            // Commit PLT hooks
             if (api && api->pltHookCommit) {
                 api->pltHookCommit();
             }
-            // Spoof Java Build fields (ID, DISPLAY, MODEL, FINGERPRINT, etc.)
             spoof_build_fields(env);
-            LOGI("All Build fields and native props locked to CD1A.260714.001.A9 successfully.");
+            LOGI("Build fields & native properties locked to Pixel 11 Pro XL (CD1A.260714.001.A9) successfully.");
         }
     }
 
