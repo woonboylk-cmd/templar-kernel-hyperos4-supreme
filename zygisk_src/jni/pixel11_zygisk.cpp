@@ -3,7 +3,6 @@
 #include <jni.h>
 #include <string.h>
 #include <string>
-#include <vector>
 #include <sys/system_properties.h>
 #include <dlfcn.h>
 #include <unistd.h>
@@ -20,9 +19,14 @@ static const char *P_PRODUCT = "kodiak";
 static const char *P_DEVICE = "kodiak";
 static const char *P_FINGERPRINT = "google/kodiak/kodiak:17/CD1A.260714.001.A9/15938155:user/release-keys";
 static const char *P_ID = "CD1A.260714.001.A9";
+static const char *P_INCREMENTAL = "15938155";
 static const char *P_SECURITY_PATCH = "2026-08-05";
 static const char *P_SOC_MODEL = "Tensor G6";
 static const char *P_SOC_MANUFACTURER = "Google";
+static const char *P_TYPE = "user";
+static const char *P_TAGS = "release-keys";
+static const char *P_HOST = "r-36404f8caf3535e4-26ss";
+static const char *P_USER = "android-build";
 
 /* Camera Whitelist (Zero Touch) */
 static const char *camera_whitelist[] = {
@@ -81,7 +85,12 @@ static void spoof_build_fields(JNIEnv *env) {
         set_static_string_field(env, build_class, "DEVICE", P_DEVICE);
         set_static_string_field(env, build_class, "FINGERPRINT", P_FINGERPRINT);
         set_static_string_field(env, build_class, "ID", P_ID);
+        set_static_string_field(env, build_class, "DISPLAY", P_ID);
         set_static_string_field(env, build_class, "HARDWARE", P_PRODUCT);
+        set_static_string_field(env, build_class, "TYPE", P_TYPE);
+        set_static_string_field(env, build_class, "TAGS", P_TAGS);
+        set_static_string_field(env, build_class, "HOST", P_HOST);
+        set_static_string_field(env, build_class, "USER", P_USER);
         set_static_string_field(env, build_class, "SOC_MODEL", P_SOC_MODEL);
         set_static_string_field(env, build_class, "SOC_MANUFACTURER", P_SOC_MANUFACTURER);
         env->DeleteLocalRef(build_class);
@@ -92,10 +101,60 @@ static void spoof_build_fields(JNIEnv *env) {
     jclass version_class = env->FindClass("android/os/Build$VERSION");
     if (version_class) {
         set_static_string_field(env, version_class, "SECURITY_PATCH", P_SECURITY_PATCH);
+        set_static_string_field(env, version_class, "INCREMENTAL", P_INCREMENTAL);
         env->DeleteLocalRef(version_class);
     } else {
         env->ExceptionClear();
     }
+}
+
+/* PLT Hook for __system_property_get in native code (WebView, Chromium, AdMob) */
+static int (*orig_system_property_get)(const char *name, char *value) = nullptr;
+
+static int my_system_property_get(const char *name, char *value) {
+    if (!name || !value) return 0;
+
+    if (strcmp(name, "ro.build.id") == 0 || strcmp(name, "ro.build.display.id") == 0) {
+        strcpy(value, P_ID);
+        return strlen(P_ID);
+    }
+    if (strcmp(name, "ro.product.model") == 0) {
+        strcpy(value, P_MODEL);
+        return strlen(P_MODEL);
+    }
+    if (strcmp(name, "ro.product.brand") == 0) {
+        strcpy(value, P_BRAND);
+        return strlen(P_BRAND);
+    }
+    if (strcmp(name, "ro.product.manufacturer") == 0) {
+        strcpy(value, P_MANUFACTURER);
+        return strlen(P_MANUFACTURER);
+    }
+    if (strcmp(name, "ro.product.name") == 0 || strcmp(name, "ro.product.device") == 0) {
+        strcpy(value, P_PRODUCT);
+        return strlen(P_PRODUCT);
+    }
+    if (strcmp(name, "ro.build.fingerprint") == 0) {
+        strcpy(value, P_FINGERPRINT);
+        return strlen(P_FINGERPRINT);
+    }
+    if (strcmp(name, "ro.build.version.incremental") == 0) {
+        strcpy(value, P_INCREMENTAL);
+        return strlen(P_INCREMENTAL);
+    }
+    if (strcmp(name, "ro.build.version.security_patch") == 0) {
+        strcpy(value, P_SECURITY_PATCH);
+        return strlen(P_SECURITY_PATCH);
+    }
+    if (strcmp(name, "ro.soc.model") == 0) {
+        strcpy(value, P_SOC_MODEL);
+        return strlen(P_SOC_MODEL);
+    }
+
+    if (orig_system_property_get) {
+        return orig_system_property_get(name, value);
+    }
+    return __system_property_get(name, value);
 }
 
 class Pixel11ZygiskModule : public zygisk::ModuleBase {
@@ -116,7 +175,12 @@ public:
                 enable_spoof = false;
             } else if (is_target_app(process_name)) {
                 enable_spoof = true;
-                LOGI("Target detected: %s -> Spoofing Pixel 11 Pro XL (Kodiak)", process_name);
+                LOGI("Target detected: %s -> Enforcing Pixel 11 Pro XL (CD1A.260714.001.A9)", process_name);
+
+                // Register PLT Hook for native libraries inside target process
+                if (api && api->pltHookRegister) {
+                    api->pltHookRegister(".*", "__system_property_get", (void *)my_system_property_get, (void **)&orig_system_property_get);
+                }
             }
             env->ReleaseStringUTFChars(args->nice_name, process_name);
         }
@@ -124,8 +188,13 @@ public:
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         if (enable_spoof && env) {
+            // Commit PLT hooks
+            if (api && api->pltHookCommit) {
+                api->pltHookCommit();
+            }
+            // Spoof Java Build fields (ID, DISPLAY, MODEL, FINGERPRINT, etc.)
             spoof_build_fields(env);
-            LOGI("Build fields spoofed to Pixel 11 Pro XL successfully.");
+            LOGI("All Build fields and native props locked to CD1A.260714.001.A9 successfully.");
         }
     }
 
