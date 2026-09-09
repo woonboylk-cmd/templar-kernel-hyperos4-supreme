@@ -18,9 +18,9 @@ on:
 
 jobs:
   build-npu:
-    name: Export NPU ExecuTorch PTE
+    name: Export NPU ExecuTorch PTE + Build Android Runner
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: Checkout CI Repository
@@ -42,9 +42,9 @@ jobs:
           sudo swapoff -a || true
           sudo rm -f /swapfile /mnt/swapfile || true
           df -h /
-          
-          echo "=== Setting up 4GB SWAP ==="
-          sudo fallocate -l 4G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
+
+          echo "=== Setting up 8GB SWAP ==="
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
@@ -57,12 +57,25 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build ccache clang lld \
             python3-pip python3-dev git git-lfs pigz zip unzip curl wget \
-            graphviz libgraphviz-dev
+            graphviz libgraphviz-dev openjdk-11-jdk-headless
           python3 -m pip install --upgrade pip setuptools wheel
           python3 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           python3 -m pip install executorch==1.4.1 torchao==0.18.0
           python3 -m pip install numpy packaging pyyaml tqdm huggingface_hub requests tabulate pydot py-cpuinfo
           python3 -m pip cache purge || true
+          df -h /
+
+      - name: Download Android NDK r26c
+        run: |
+          echo "=== Downloading Android NDK r26c ==="
+          NDK_URL="https://dl.google.com/android/repository/android-ndk-r26c-linux.zip"
+          wget -q --show-progress "$NDK_URL" -O /tmp/ndk.zip
+          sudo unzip -q /tmp/ndk.zip -d /opt/
+          rm /tmp/ndk.zip
+          NDK_PATH=$(find /opt -maxdepth 1 -name "android-ndk-r26*" -type d | head -1)
+          echo "NDK_PATH=${NDK_PATH}" >> $GITHUB_ENV
+          echo "ANDROID_NDK=${NDK_PATH}" >> $GITHUB_ENV
+          echo "NDK found at: ${NDK_PATH}"
           df -h /
 
       - name: Setup ExecuTorch Repository
@@ -71,6 +84,10 @@ jobs:
           git clone --depth=1 --branch v1.4.1 https://github.com/pytorch/executorch.git et_root || \
           git clone --depth=1 https://github.com/pytorch/executorch.git et_root
           cd et_root
+          git submodule update --init --recursive --depth=1 \
+            third-party/flatbuffers \
+            third-party/cpuinfo \
+            third-party/pthreadpool || true
           python3 -m pip install -r backends/qualcomm/requirements.txt || true
           mkdir -p backends/arm/third-party/serialization_lib/python/serializer
           touch backends/arm/third-party/serialization_lib/python/serializer/__init__.py
@@ -99,16 +116,14 @@ jobs:
           python3 -c "import torch, executorch, torchao; print('PyTorch:', torch.__version__, 'TorchAO:', torchao.__version__, 'ExecuTorch ready')"
           python3 -c "import executorch.backends.qualcomm; print('Qualcomm Backend successfully loaded!')"
 
-      - name: Export Model for Target SoC (${{ inputs.SOC_MODEL }})
+      - name: Export PTE Models for Target SoC (${{ inputs.SOC_MODEL }})
         run: |
           mkdir -p output_artifacts
           mkdir -p et_root/build-android
           cd et_root
           export PYTHONPATH=$PWD:$PWD/examples:${PYTHONPATH}
           export LD_LIBRARY_PATH="${QNN_SDK_ROOT}/lib/x86_64-linux-clang:${LD_LIBRARY_PATH}"
-          
-          echo "Building NPU ExecuTorch PTE for SoC: ${{ inputs.SOC_MODEL }} on Hexagon HTP Backend"
-          
+
           echo "=== 1. Exporting Qualcomm Hexagon HTP MobileNetV2 PTE ==="
           python3 -m examples.qualcomm.scripts.export_example \
             -m mv2 \
@@ -116,7 +131,7 @@ jobs:
             -f ../output_artifacts/ \
             --soc ${{ inputs.SOC_MODEL }} \
             -q ptq
-            
+
           echo "=== 2. Exporting Qualcomm Hexagon HTP Linear Demo PTE ==="
           python3 -m examples.qualcomm.scripts.export_example \
             -m linear \
@@ -125,20 +140,7 @@ jobs:
             --soc ${{ inputs.SOC_MODEL }} \
             -q ptq
 
-          if [ -f "examples/qualcomm/oss_scripts/llama/llama.py" ]; then
-            echo "=== 3. Exporting LLM Architecture: ${{ inputs.DECODER_MODEL }} ==="
-            python3 examples/qualcomm/oss_scripts/llama/llama.py \
-              --artifact ../output_artifacts \
-              --build_folder build-android \
-              --soc_model ${{ inputs.SOC_MODEL }} \
-              --backend htp \
-              --decoder_model ${{ inputs.DECODER_MODEL }} \
-              --model_mode ${{ inputs.EXPORT_MODE }} \
-              --compile_only \
-              --prompt "Hello" || echo "Note: Specialized LLM export requires custom weights; baseline PTEs generated successfully."
-          fi
-
-          echo "=== 4. Artifact Verification ==="
+          echo "=== Artifact Verification ==="
           ls -lh ../output_artifacts/
           COUNT=$(ls -1 ../output_artifacts/*.pte 2>/dev/null | wc -l)
           echo "Total .pte binaries created: $COUNT"
@@ -147,11 +149,84 @@ jobs:
             exit 1
           fi
 
-      - name: Package & Upload Artifacts
+      - name: Build ExecuTorch Android Runtime (Phase 1 - arm64-v8a)
+        run: |
+          cd et_root
+          echo "=== Phase 1: Build ExecuTorch Core Runtime for Android arm64 ==="
+          mkdir -p cmake-android-out
+
+          cmake \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_PATH}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DEXECUTORCH_BUILD_QNN=ON \
+            -DQNN_SDK_ROOT="${QNN_SDK_ROOT}" \
+            -DEXECUTORCH_BUILD_EXTENSION_MODULE=ON \
+            -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON \
+            -DEXECUTORCH_ENABLE_LOGGING=ON \
+            -DCMAKE_INSTALL_PREFIX=cmake-android-out/install \
+            -Bcmake-android-out \
+            -GNinja \
+            .
+
+          cmake --build cmake-android-out \
+            --target install \
+            --parallel $(nproc) 2>&1 | tail -n 40
+
+          echo "=== Phase 1 complete ==="
+          ls -lh cmake-android-out/install/lib/ 2>/dev/null | head -20 || true
+
+      - name: Build qnn_executor_runner Binary (Phase 2 - arm64-v8a)
+        run: |
+          cd et_root
+          echo "=== Phase 2: Build qnn_executor_runner ==="
+          mkdir -p cmake-qnn-runner-out
+
+          cmake \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_PATH}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DQNN_SDK_ROOT="${QNN_SDK_ROOT}" \
+            -DCMAKE_PREFIX_PATH="$PWD/cmake-android-out/install" \
+            -Bcmake-qnn-runner-out \
+            -GNinja \
+            examples/qualcomm
+
+          cmake --build cmake-qnn-runner-out \
+            --target qnn_executor_runner \
+            --parallel $(nproc) 2>&1 | tail -n 60
+
+          echo "=== Locating binary ==="
+          mkdir -p ../output_artifacts/bin
+          mkdir -p ../output_artifacts/lib
+
+          RUNNER_BIN=$(find cmake-qnn-runner-out -name "qnn_executor_runner" -type f 2>/dev/null | head -1)
+          if [ -z "$RUNNER_BIN" ]; then
+            RUNNER_BIN=$(find cmake-qnn-runner-out -name "*executor*runner*" -type f 2>/dev/null | head -1)
+          fi
+
+          if [ -n "$RUNNER_BIN" ]; then
+            cp "$RUNNER_BIN" ../output_artifacts/bin/qnn_executor_runner
+            echo "SUCCESS: qnn_executor_runner ready"
+            ls -lh ../output_artifacts/bin/
+            file ../output_artifacts/bin/qnn_executor_runner
+          else
+            echo "WARNING: Runner binary not found, listing build outputs..."
+            find cmake-qnn-runner-out -type f | head -30
+          fi
+
+          # Copy QNN HTP arm64 shared libs needed on-device
+          echo "=== Copying QNN HTP arm64 shared libs ==="
+          cp "${QNN_SDK_ROOT}"/lib/aarch64-android/libQnnHtp*.so ../output_artifacts/lib/ 2>/dev/null && \
+            echo "HTP libs copied OK" || echo "No HTP libs at expected path"
+          ls -lh ../output_artifacts/lib/ 2>/dev/null || true
+
+      - name: Package & Upload All Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: npu-executorch-${{ inputs.SOC_MODEL }}
           path: |
             output_artifacts/
-            et_root/build-android/
           if-no-files-found: warn
