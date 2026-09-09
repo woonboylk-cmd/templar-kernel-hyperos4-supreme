@@ -56,6 +56,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build ccache clang lld \
+            libgflags-dev libabsl-dev \
             python3-pip python3-dev git git-lfs pigz zip unzip curl wget \
             graphviz libgraphviz-dev openjdk-11-jdk-headless
           python3 -m pip install --upgrade pip setuptools wheel
@@ -85,7 +86,12 @@ jobs:
           git clone --depth=1 https://github.com/pytorch/executorch.git et_root
           cd et_root
           git submodule sync
-          git submodule update --init --recursive --depth=1 || true
+          git submodule update --init --recursive --depth=1 \
+            third-party/flatbuffers \
+            third-party/flatcc \
+            third-party/gflags \
+            third-party/json \
+            third-party/pybind11 || true
           python3 -m pip install -r backends/qualcomm/requirements.txt || true
           mkdir -p backends/arm/third-party/serialization_lib/python/serializer
           touch backends/arm/third-party/serialization_lib/python/serializer/__init__.py
@@ -162,6 +168,8 @@ jobs:
             -DQNN_SDK_ROOT="${QNN_SDK_ROOT}" \
             -DEXECUTORCH_BUILD_EXTENSION_MODULE=ON \
             -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON \
+            -DEXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR=ON \
+            -DEXECUTORCH_BUILD_EXTENSION_NAMED_DATA_MAP=ON \
             -DEXECUTORCH_BUILD_EXTENSION_TENSOR=ON \
             -DEXECUTORCH_ENABLE_LOGGING=ON \
             -DCMAKE_INSTALL_PREFIX=cmake-android-out/install \
