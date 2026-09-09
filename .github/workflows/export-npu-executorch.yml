@@ -84,10 +84,8 @@ jobs:
           git clone --depth=1 --branch v1.4.1 https://github.com/pytorch/executorch.git et_root || \
           git clone --depth=1 https://github.com/pytorch/executorch.git et_root
           cd et_root
-          git submodule update --init --recursive --depth=1 \
-            third-party/flatbuffers \
-            third-party/cpuinfo \
-            third-party/pthreadpool || true
+          git submodule sync
+          git submodule update --init --recursive --depth=1 || true
           python3 -m pip install -r backends/qualcomm/requirements.txt || true
           mkdir -p backends/arm/third-party/serialization_lib/python/serializer
           touch backends/arm/third-party/serialization_lib/python/serializer/__init__.py
@@ -164,6 +162,7 @@ jobs:
             -DQNN_SDK_ROOT="${QNN_SDK_ROOT}" \
             -DEXECUTORCH_BUILD_EXTENSION_MODULE=ON \
             -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON \
+            -DEXECUTORCH_BUILD_EXTENSION_TENSOR=ON \
             -DEXECUTORCH_ENABLE_LOGGING=ON \
             -DCMAKE_INSTALL_PREFIX=cmake-android-out/install \
             -Bcmake-android-out \
@@ -189,13 +188,14 @@ jobs:
             -DANDROID_PLATFORM=android-26 \
             -DCMAKE_BUILD_TYPE=Release \
             -DQNN_SDK_ROOT="${QNN_SDK_ROOT}" \
-            -DCMAKE_PREFIX_PATH="$PWD/cmake-android-out/install" \
+            -DCMAKE_PREFIX_PATH="$PWD/cmake-android-out/install;$PWD/cmake-android-out/install/lib/cmake/ExecuTorch;$PWD/cmake-android-out/third-party/gflags" \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+            -DPYTHON_EXECUTABLE=python3 \
             -Bcmake-qnn-runner-out \
             -GNinja \
             examples/qualcomm
 
           cmake --build cmake-qnn-runner-out \
-            --target qnn_executor_runner \
             --parallel $(nproc) 2>&1 | tail -n 60
 
           echo "=== Locating binary ==="
