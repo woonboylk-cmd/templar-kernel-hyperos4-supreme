@@ -175,6 +175,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DEXECUTORCH_BUILD_QNN=ON \
             -DQNN_SDK_ROOT="${QNN_SDK_ROOT}" \
+            -DEXECUTORCH_BUILD_DEVTOOLS=ON \
+            -DEXECUTORCH_ENABLE_EVENT_TRACER=ON \
             -DEXECUTORCH_BUILD_EXTENSION_MODULE=ON \
             -DEXECUTORCH_BUILD_EXTENSION_DATA_LOADER=ON \
             -DEXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR=ON \
@@ -192,7 +194,7 @@ jobs:
             --parallel $(nproc) 2>&1 | tail -n 40
 
           echo "=== Phase 1 complete ==="
-          ls -lh cmake-android-out/install/lib/ 2>/dev/null | head -20 || true
+          ls -lh cmake-android-out/install/lib/ 2>/dev/null | head -25 || true
 
       - name: Build Abseil (absl) for Android arm64
         run: |
@@ -216,6 +218,7 @@ jobs:
 
       - name: Build qnn_executor_runner Binary (Phase 2 - arm64-v8a)
         run: |
+          set -o pipefail
           cd executorch
           echo "=== Phase 2: Build qnn_executor_runner ==="
           mkdir -p cmake-qnn-runner-out
@@ -238,6 +241,7 @@ jobs:
             -DEXECUTORCH_BUILD_QNN=ON \
             -DQNN_SDK_ROOT="${QNN_SDK_ROOT}" \
             -DCMAKE_PREFIX_PATH="$PWD/cmake-android-out/install;$PWD/cmake-android-out/install/lib/cmake/ExecuTorch;$PWD/cmake-android-out/third-party/gflags;/tmp/abseil-install" \
+            -DCMAKE_LIBRARY_PATH="$PWD/cmake-android-out/install/lib" \
             -Dabsl_DIR="/tmp/abseil-install/lib/cmake/absl" \
             -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
             -DPYTHON_EXECUTABLE=python3 \
@@ -248,25 +252,26 @@ jobs:
 
           cmake --build cmake-qnn-runner-out \
             --target qnn_executor_runner \
-            --parallel $(nproc) 2>&1 | tail -n 60
+            --parallel $(nproc)
 
           echo "=== Locating binary ==="
           mkdir -p ../output_artifacts/bin
           mkdir -p ../output_artifacts/lib
 
-          RUNNER_BIN=$(find cmake-qnn-runner-out -name "qnn_executor_runner" -type f 2>/dev/null | head -1)
+          RUNNER_BIN=$(find cmake-qnn-runner-out -type f -name "qnn_executor_runner" -perm -111 2>/dev/null | head -1)
           if [ -z "$RUNNER_BIN" ]; then
-            RUNNER_BIN=$(find cmake-qnn-runner-out -name "*executor*runner*" -type f 2>/dev/null | head -1)
+            RUNNER_BIN="cmake-qnn-runner-out/executor_runner/qnn_executor_runner"
           fi
 
-          if [ -n "$RUNNER_BIN" ]; then
+          if [ -f "$RUNNER_BIN" ]; then
             cp "$RUNNER_BIN" ../output_artifacts/bin/qnn_executor_runner
             echo "SUCCESS: qnn_executor_runner ready"
             ls -lh ../output_artifacts/bin/
             file ../output_artifacts/bin/qnn_executor_runner
           else
-            echo "WARNING: Runner binary not found, listing build outputs..."
+            echo "CRITICAL: Runner binary not found!"
             find cmake-qnn-runner-out -type f | head -30
+            exit 1
           fi
 
           # Copy QNN HTP arm64 shared libs needed on-device
