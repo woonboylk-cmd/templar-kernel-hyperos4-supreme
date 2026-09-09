@@ -84,6 +84,8 @@ jobs:
           QNN_DIR=$(python3 backends/qualcomm/scripts/download_qnn_sdk.py --print-sdk-path)
           echo "Resolved QNN_SDK_ROOT: ${QNN_DIR}"
           echo "QNN_SDK_ROOT=${QNN_DIR}" >> $GITHUB_ENV
+          echo "${QNN_DIR}/lib/x86_64-linux-clang" | sudo tee /etc/ld.so.conf.d/qualcomm.conf
+          sudo ldconfig
           echo "LD_LIBRARY_PATH=${QNN_DIR}/lib/x86_64-linux-clang:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
           echo "PYTHONPATH=$PWD:$PWD/examples:${PYTHONPATH}" >> $GITHUB_ENV
 
@@ -92,8 +94,9 @@ jobs:
           cd et_root
           echo "=== Qualcomm Backend Verification ==="
           echo "QNN_SDK_ROOT: $QNN_SDK_ROOT"
+          export LD_LIBRARY_PATH="${QNN_SDK_ROOT}/lib/x86_64-linux-clang:${LD_LIBRARY_PATH}"
           ls -la "$QNN_SDK_ROOT/lib/x86_64-linux-clang" || true
-          python3 -c "import torch, executorch, torchao; print('PyTorch:', torch.__version__, 'ExecuTorch:', executorch.__version__, 'TorchAO:', torchao.__version__)"
+          python3 -c "import torch, executorch, torchao; print('PyTorch:', torch.__version__, 'TorchAO:', torchao.__version__, 'ExecuTorch ready')"
           python3 -c "import executorch.backends.qualcomm; print('Qualcomm Backend successfully loaded!')"
 
       - name: Export Model for Target SoC (${{ inputs.SOC_MODEL }})
@@ -102,6 +105,7 @@ jobs:
           mkdir -p et_root/build-android
           cd et_root
           export PYTHONPATH=$PWD:$PWD/examples:${PYTHONPATH}
+          export LD_LIBRARY_PATH="${QNN_SDK_ROOT}/lib/x86_64-linux-clang:${LD_LIBRARY_PATH}"
           
           echo "Building NPU ExecuTorch PTE for SoC: ${{ inputs.SOC_MODEL }} on Hexagon HTP Backend"
           
