@@ -224,33 +224,10 @@ jobs:
           QUALCOMM_CMAKE="examples/qualcomm/CMakeLists.txt"
           if [ -f "$QUALCOMM_CMAKE" ]; then
             cp "$QUALCOMM_CMAKE" "$QUALCOMM_CMAKE.bak"
-            # Use python to surgically rewrite: comment out ALL add_subdirectory() lines
-            # except the one containing 'qnn_executor_runner'
-            python3 - <<'PYEOF'
-import re, sys
-cmake_path = "examples/qualcomm/CMakeLists.txt"
-with open(cmake_path, "r") as f:
-    content = f.read()
-
-def strip_add_subdirectory(content):
-    lines = content.splitlines(keepends=True)
-    result = []
-    for line in lines:
-        stripped = line.strip()
-        # Comment out any add_subdirectory that is NOT qnn_executor_runner
-        if re.match(r'add_subdirectory\s*\(', stripped, re.IGNORECASE):
-            if 'qnn_executor_runner' not in stripped:
-                line = "# [DISABLED by CI] " + line
-        result.append(line)
-    return "".join(result)
-
-new_content = strip_add_subdirectory(content)
-with open(cmake_path, "w") as f:
-    f.write(new_content)
-print("Patched successfully.")
-PYEOF
-            echo "  Patched $QUALCOMM_CMAKE — only qnn_executor_runner subdir kept"
-            grep -n "add_subdirectory" "$QUALCOMM_CMAKE" || echo "  (no remaining add_subdirectory lines)"
+            # Comment out ALL add_subdirectory except qnn_executor_runner using perl one-liner
+            perl -i -pe 's{^(\s*add_subdirectory\s*\([^)]*\)\s*)$}{# [DISABLED] $1}i if !/qnn_executor_runner/' "$QUALCOMM_CMAKE"
+            echo "  Patch done. Active add_subdirectory remaining:"
+            grep -n "^[^#]*add_subdirectory" "$QUALCOMM_CMAKE" || echo "  (none active - good)"
           fi
 
           cmake \
