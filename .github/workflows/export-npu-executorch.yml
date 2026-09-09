@@ -206,21 +206,37 @@ jobs:
           echo "=== Phase 2: Build qnn_executor_runner ==="
           mkdir -p cmake-qnn-runner-out
 
+          echo "--- Patching: disable unwanted qai-hub example trees (stable_diffusion/whisper/tokenizers need re2/tokenizers which we don't ship) ---"
+          # CMake error from r6: qaihub_scripts/stable_diffusion/CMakeLists.txt links re2::re2 + tokenizers::tokenizers
+          # -> regenerate examples/qualcomm/CMakeLists.txt to only keep qnn_executor_runner subdir
+          QUALCOMM_CMAKE="examples/qualcomm/CMakeLists.txt"
+          if [ -f "$QUALCOMM_CMAKE" ]; then
+            cp "$QUALCOMM_CMAKE" "$QUALCOMM_CMAKE.bak"
+            sed -i \
+              -e 's/^[[:space:]]*add_subdirectory(qaihub_scripts.*/[IMPORTANT] qaihub disabled/gi' \
+              "$QUALCOMM_CMAKE"
+            echo "  patched $QUALCOMM_CMAKE (stripped qaihub_scripts subtree)"
+            tail -n 8 "$QUALCOMM_CMAKE"
+          fi
+
           cmake \
             -DCMAKE_TOOLCHAIN_FILE="${NDK_PATH}/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-26 \
             -DCMAKE_BUILD_TYPE=Release \
+            -DEXECUTORCH_BUILD_QNN=ON \
             -DQNN_SDK_ROOT="${QNN_SDK_ROOT}" \
             -DCMAKE_PREFIX_PATH="$PWD/cmake-android-out/install;$PWD/cmake-android-out/install/lib/cmake/ExecuTorch;$PWD/cmake-android-out/third-party/gflags;/tmp/abseil-install" \
             -Dabsl_DIR="/tmp/abseil-install/lib/cmake/absl" \
             -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
             -DPYTHON_EXECUTABLE=python3 \
+            -DQAIHUB_BUILD_ALL=OFF \
             -Bcmake-qnn-runner-out \
             -GNinja \
             examples/qualcomm
 
           cmake --build cmake-qnn-runner-out \
+            --target qnn_executor_runner \
             --parallel $(nproc) 2>&1 | tail -n 60
 
           echo "=== Locating binary ==="
