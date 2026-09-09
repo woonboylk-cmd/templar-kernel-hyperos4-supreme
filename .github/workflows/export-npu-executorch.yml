@@ -28,19 +28,28 @@ jobs:
 
       - name: Clean Disk & Create High-Capacity Swap
         run: |
-          echo "=== Freeing disk space ==="
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          echo "=== Freeing maximal disk space ==="
+          sudo rm -rf /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /usr/local/share/boost \
+                      /usr/local/share/powershell \
+                      /usr/local/share/chromium \
+                      /usr/share/swift \
+                      /var/lib/docker
+          sudo docker system prune -af --volumes || true
           sudo apt-get clean
-          df -h /
-          
-          echo "=== Setting up 12GB SWAP ==="
           sudo swapoff -a || true
           sudo rm -f /swapfile /mnt/swapfile || true
-          sudo fallocate -l 12G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=12288
+          df -h /
+          
+          echo "=== Setting up 4GB SWAP ==="
+          sudo fallocate -l 4G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
           free -h
+          df -h /
 
       - name: Setup Build Dependencies & Python 3.10
         run: |
@@ -53,6 +62,8 @@ jobs:
           python3 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           python3 -m pip install executorch==1.4.1 torchao==0.18.0
           python3 -m pip install numpy packaging pyyaml tqdm huggingface_hub requests tabulate pydot py-cpuinfo
+          python3 -m pip cache purge || true
+          df -h /
 
       - name: Setup ExecuTorch Repository
         run: |
