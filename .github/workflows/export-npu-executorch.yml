@@ -278,6 +278,14 @@ jobs:
           echo "=== Copying QNN HTP arm64 shared libs ==="
           cp "${QNN_SDK_ROOT}"/lib/aarch64-android/libQnnHtp*.so ../output_artifacts/lib/ 2>/dev/null && \
             echo "HTP libs copied OK" || echo "No HTP libs at expected path"
+
+          # Copy ExecuTorch QNN backend shared library
+          echo "=== Copying ExecuTorch QNN backend shared library ==="
+          find cmake-android-out/install -name "libqnn_executorch_backend.so" -exec cp -vf {} ../output_artifacts/lib/ \;
+          cp -vf ../output_artifacts/lib/libqnn_executorch_backend.so ../output_artifacts/bin/ 2>/dev/null || true
+
+          echo "=== Artifacts verification ==="
+          ls -lh ../output_artifacts/bin/ 2>/dev/null || true
           ls -lh ../output_artifacts/lib/ 2>/dev/null || true
 
       - name: Package & Upload All Artifacts
