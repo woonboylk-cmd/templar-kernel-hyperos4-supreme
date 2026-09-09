@@ -15,12 +15,21 @@ on:
         description: 'Export Mode'
         required: true
         default: 'hybrid'
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/export-npu-executorch.yml'
 
 jobs:
   build-npu:
     name: Export NPU ExecuTorch PTE + Build Android Runner
     runs-on: ubuntu-22.04
     timeout-minutes: 240
+
+    env:
+      SOC_MODEL: ${{ inputs.SOC_MODEL || 'SM8475' }}
+      DECODER_MODEL: ${{ inputs.DECODER_MODEL || 'llama3_2-1b_instruct' }}
+      EXPORT_MODE: ${{ inputs.EXPORT_MODE || 'hybrid' }}
 
     steps:
       - name: Checkout CI Repository
