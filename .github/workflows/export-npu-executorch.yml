@@ -1,0 +1,96 @@
+﻿name: Build Qualcomm NPU ExecuTorch Engine (SM8475)
+
+on:
+  workflow_dispatch:
+    inputs:
+      SOC_MODEL:
+        description: 'Qualcomm SoC Model (SM8475 for Snapdragon 8+ Gen 1, SM8450, SM8550)'
+        required: true
+        default: 'SM8475'
+      DECODER_MODEL:
+        description: 'Decoder Model Architecture'
+        required: true
+        default: 'llama3_2-1b_instruct'
+      EXPORT_MODE:
+        description: 'Export Mode'
+        required: true
+        default: 'hybrid'
+
+jobs:
+  build-npu:
+    name: Export NPU ExecuTorch PTE
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout CI Repository
+        uses: actions/checkout@v4
+
+      - name: Clean Disk & Create High-Capacity Swap
+        run: |
+          echo "=== Freeing disk space ==="
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo apt-get clean
+          df -h /
+          
+          echo "=== Setting up 24GB SWAP ==="
+          sudo fallocate -l 24G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=24576
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Setup Build Dependencies & Python 3.10
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build ccache clang lld \
+            python3-pip python3-dev git git-lfs pigz zip unzip curl wget
+          python3 -m pip install --upgrade pip setuptools wheel
+          python3 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          python3 -m pip install numpy packaging pyyaml tqdm huggingface_hub requests
+
+      - name: Setup ExecuTorch Repository & Submodules
+        run: |
+          echo "=== Cloning ExecuTorch ==="
+          git clone --depth=1 --branch v0.4.0 https://github.com/pytorch/executorch.git et_root || \
+          git clone --depth=1 https://github.com/pytorch/executorch.git et_root
+          cd et_root
+          git submodule update --init --recursive --depth=1 || true
+          ./install_requirements.sh || true
+          pip install -e . || true
+
+      - name: Inspect Qualcomm Backends
+        run: |
+          cd et_root
+          echo "=== Qualcomm Backend Structure ==="
+          ls -la backends/qualcomm/ || true
+          ls -la examples/qualcomm/ || true
+          ls -la examples/qualcomm/oss_scripts/llama/ || true
+
+      - name: Export Model for Target SoC (${{ inputs.SOC_MODEL }})
+        run: |
+          mkdir -p output_artifacts
+          echo "Building NPU ExecuTorch PTE for SoC: ${{ inputs.SOC_MODEL }} on Hexagon HTP Backend"
+          cd et_root
+          python3 -c "import torch, executorch; print('PyTorch:', torch.__version__, 'ExecuTorch:', executorch.__version__)"
+          
+          if [ -f "examples/qualcomm/oss_scripts/llama/llama.py" ]; then
+            python3 examples/qualcomm/oss_scripts/llama/llama.py \
+              --artifact ../output_artifacts \
+              --soc_model ${{ inputs.SOC_MODEL }} \
+              --backend htp \
+              --decoder_model ${{ inputs.DECODER_MODEL }} \
+              --model_mode ${{ inputs.EXPORT_MODE }} \
+              --prefill_ar_len 128 \
+              --max_seq_len 1024 || true
+          fi
+
+      - name: Package & Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: npu-executorch-${{ inputs.SOC_MODEL }}
+          path: |
+            output_artifacts/
+            et_root/build-android/
+          if-no-files-found: warn
