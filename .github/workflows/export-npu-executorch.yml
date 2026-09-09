@@ -95,7 +95,8 @@ jobs:
             third-party/flatcc \
             third-party/gflags \
             third-party/json \
-            third-party/pybind11 || git submodule update --init --recursive --depth=1 || true
+            third-party/pybind11 \
+            extension/llm/tokenizers || git submodule update --init --recursive --depth=1 || true
           python3 -m pip install -r backends/qualcomm/requirements.txt || true
           mkdir -p backends/arm/third-party/serialization_lib/python/serializer
           touch backends/arm/third-party/serialization_lib/python/serializer/__init__.py
@@ -175,6 +176,7 @@ jobs:
             -DEXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR=ON \
             -DEXECUTORCH_BUILD_EXTENSION_NAMED_DATA_MAP=ON \
             -DEXECUTORCH_BUILD_EXTENSION_TENSOR=ON \
+            -DEXECUTORCH_BUILD_KERNELS_QUANTIZED=ON \
             -DEXECUTORCH_ENABLE_LOGGING=ON \
             -DCMAKE_INSTALL_PREFIX=cmake-android-out/install \
             -Bcmake-android-out \
