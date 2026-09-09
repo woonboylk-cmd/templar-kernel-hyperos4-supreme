@@ -129,7 +129,7 @@ jobs:
           python3 -c "import torch, executorch, torchao; print('PyTorch:', torch.__version__, 'TorchAO:', torchao.__version__, 'ExecuTorch ready')"
           python3 -c "import executorch.backends.qualcomm; print('Qualcomm Backend successfully loaded!')"
 
-      - name: Export PTE Models for Target SoC (${{ inputs.SOC_MODEL }})
+      - name: Export PTE Models for Target SoC (${{ env.SOC_MODEL }})
         run: |
           mkdir -p output_artifacts
           mkdir -p executorch/build-android
@@ -142,7 +142,7 @@ jobs:
             -m mv2 \
             -g \
             -f ../output_artifacts/ \
-            --soc ${{ inputs.SOC_MODEL }} \
+            --soc "${SOC_MODEL}" \
             -q ptq
 
           echo "=== 2. Exporting Qualcomm Hexagon HTP Linear Demo PTE ==="
@@ -150,7 +150,7 @@ jobs:
             -m linear \
             -g \
             -f ../output_artifacts/ \
-            --soc ${{ inputs.SOC_MODEL }} \
+            --soc "${SOC_MODEL}" \
             -q ptq
 
           echo "=== Artifact Verification ==="
@@ -220,14 +220,14 @@ jobs:
           echo "=== Phase 2: Build qnn_executor_runner ==="
           mkdir -p cmake-qnn-runner-out
 
-          echo "--- Patching: strip ALL subdirs except qnn_executor_runner from examples/qualcomm/CMakeLists.txt ---"
+          echo "--- Patching: disable oss_scripts and qaihub_scripts in examples/qualcomm/CMakeLists.txt ---"
           QUALCOMM_CMAKE="examples/qualcomm/CMakeLists.txt"
           if [ -f "$QUALCOMM_CMAKE" ]; then
             cp "$QUALCOMM_CMAKE" "$QUALCOMM_CMAKE.bak"
-            # Comment out ALL add_subdirectory except qnn_executor_runner using perl one-liner
-            perl -i -pe 's{^(\s*add_subdirectory\s*\([^)]*\)\s*)$}{# [DISABLED] $1}i if !/qnn_executor_runner/' "$QUALCOMM_CMAKE"
+            sed -i -e 's|add_subdirectory(.*oss_scripts|# [DISABLED] &|' "$QUALCOMM_CMAKE"
+            sed -i -e 's|add_subdirectory(.*qaihub_scripts|# [DISABLED] &|' "$QUALCOMM_CMAKE"
             echo "  Patch done. Active add_subdirectory remaining:"
-            grep -n "^[^#]*add_subdirectory" "$QUALCOMM_CMAKE" || echo "  (none active - good)"
+            grep -n "^[^#]*add_subdirectory" "$QUALCOMM_CMAKE" || true
           fi
 
           cmake \
@@ -278,7 +278,7 @@ jobs:
       - name: Package & Upload All Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: npu-executorch-${{ inputs.SOC_MODEL }}
+          name: npu-executorch-${{ env.SOC_MODEL }}
           path: |
             output_artifacts/
           if-no-files-found: warn
