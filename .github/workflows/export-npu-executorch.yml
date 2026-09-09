@@ -211,17 +211,37 @@ jobs:
           echo "=== Phase 2: Build qnn_executor_runner ==="
           mkdir -p cmake-qnn-runner-out
 
-          echo "--- Patching: disable unwanted qai-hub example trees (stable_diffusion/whisper/tokenizers need re2/tokenizers which we don't ship) ---"
-          # CMake error from r6: qaihub_scripts/stable_diffusion/CMakeLists.txt links re2::re2 + tokenizers::tokenizers
-          # -> regenerate examples/qualcomm/CMakeLists.txt to only keep qnn_executor_runner subdir
+          echo "--- Patching: strip ALL subdirs except qnn_executor_runner from examples/qualcomm/CMakeLists.txt ---"
           QUALCOMM_CMAKE="examples/qualcomm/CMakeLists.txt"
           if [ -f "$QUALCOMM_CMAKE" ]; then
             cp "$QUALCOMM_CMAKE" "$QUALCOMM_CMAKE.bak"
-            sed -i \
-              -e 's/^[[:space:]]*add_subdirectory(qaihub_scripts.*/[IMPORTANT] qaihub disabled/gi' \
-              "$QUALCOMM_CMAKE"
-            echo "  patched $QUALCOMM_CMAKE (stripped qaihub_scripts subtree)"
-            tail -n 8 "$QUALCOMM_CMAKE"
+            # Use python to surgically rewrite: comment out ALL add_subdirectory() lines
+            # except the one containing 'qnn_executor_runner'
+            python3 - <<'PYEOF'
+import re, sys
+cmake_path = "examples/qualcomm/CMakeLists.txt"
+with open(cmake_path, "r") as f:
+    content = f.read()
+
+def strip_add_subdirectory(content):
+    lines = content.splitlines(keepends=True)
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        # Comment out any add_subdirectory that is NOT qnn_executor_runner
+        if re.match(r'add_subdirectory\s*\(', stripped, re.IGNORECASE):
+            if 'qnn_executor_runner' not in stripped:
+                line = "# [DISABLED by CI] " + line
+        result.append(line)
+    return "".join(result)
+
+new_content = strip_add_subdirectory(content)
+with open(cmake_path, "w") as f:
+    f.write(new_content)
+print("Patched successfully.")
+PYEOF
+            echo "  Patched $QUALCOMM_CMAKE — only qnn_executor_runner subdir kept"
+            grep -n "add_subdirectory" "$QUALCOMM_CMAKE" || echo "  (no remaining add_subdirectory lines)"
           fi
 
           cmake \
