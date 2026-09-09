@@ -27,9 +27,9 @@ jobs:
     timeout-minutes: 240
 
     env:
-      SOC_MODEL: ${{ inputs.SOC_MODEL || 'SM8475' }}
-      DECODER_MODEL: ${{ inputs.DECODER_MODEL || 'llama3_2-1b_instruct' }}
-      EXPORT_MODE: ${{ inputs.EXPORT_MODE || 'hybrid' }}
+      SOC_MODEL: "${{ inputs.SOC_MODEL || 'SM8475' }}"
+      DECODER_MODEL: "${{ inputs.DECODER_MODEL || 'llama3_2-1b_instruct' }}"
+      EXPORT_MODE: "${{ inputs.EXPORT_MODE || 'hybrid' }}"
 
     steps:
       - name: Checkout CI Repository
