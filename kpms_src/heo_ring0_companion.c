@@ -14,7 +14,6 @@
 #include <hook.h>
 #include <linux/printk.h>
 #include <uapi/asm-generic/unistd.h>
-#include <linux/uaccess.h>
 #include <syscall.h>
 #include <linux/string.h>
 
@@ -29,13 +28,19 @@ KPM_DESCRIPTION("HEO Ring 0 Sovereign Kernel Companion - Challenge-Response Auth
 #define HEO_CMD_VERIFY_AUTH      0x02
 #define HEO_CMD_STATUS           0x03
 #define HEO_CMD_FORCE_YAMA_OFF   0x04
-#define HEO_CMD_HOTPATCH_PID     0x05
 
-/* Secret pre-shared HMAC salt: "HEO_SOVEREIGN_R0" */
+/* Secret pre-shared salt: "HEO_SOVEREIGN_R0" */
 #define HEO_SECRET_SALT          0xA55A1337BEEFCAFEULL
 
-static pid_t authorized_heo_tgid = 0;
-static uint64_t current_nonce = 0;
+static unsigned long authorized_task_ptr = 0;
+static uint64_t current_nonce = 0x1337CAFEBEEFULL;
+
+/* Read ARM64 sp_el0 to uniquely identify current task struct in Ring 0 */
+static inline unsigned long get_current_task_ptr(void) {
+    unsigned long sp_el0;
+    asm volatile("mrs %0, sp_el0" : "=r"(sp_el0));
+    return sp_el0;
+}
 
 /* Syscall prctl hook function:
  * long prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5);
@@ -48,53 +53,54 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
     }
 
     unsigned long cmd = (unsigned long)args->arg1;
-    void __user *user_buf = (void __user *)args->arg2;
+    unsigned long task_now = get_current_task_ptr();
 
     switch (cmd) {
         case HEO_CMD_GET_CHALLENGE: {
-            /* Sinh nonce ngẫu nhiên từ nhân */
-            current_nonce = (current_nonce * 6364136223846793005ULL) + 1442695040888963407ULL + 0x55AA;
-            if (user_buf) {
-                if (copy_to_user(user_buf, &current_nonce, sizeof(uint64_t)) == 0) {
-                    pr_info("[HEO-KPM] Nonce challenge issued to PID %d\n", current->pid);
-                }
-            }
+            /* Sinh nonce ngẫu nhiên 64-bit */
+            current_nonce = (current_nonce * 6364136223846793005ULL) + 1442695040888963407ULL + task_now;
+            args->ret = (long)current_nonce;
+            pr_info("[HEO-KPM] Nonce challenge issued via register: 0x%llx\n", current_nonce);
             break;
         }
 
         case HEO_CMD_VERIFY_AUTH: {
-            /* Xác thực Token từ HEO App */
-            uint64_t client_token = 0;
-            if (user_buf && copy_from_user(&client_token, user_buf, sizeof(uint64_t)) == 0) {
-                uint64_t expected_token = current_nonce ^ HEO_SECRET_SALT;
-                if (client_token == expected_token) {
-                    authorized_heo_tgid = current->tgid;
-                    pr_info("[HEO-KPM] Authentication SUCCESS! TGID %d granted Ring 0 Sovereign privilege.\n", authorized_heo_tgid);
-                } else {
-                    pr_warn("[HEO-KPM] Auth FAILED: token mismatch from PID %d!\n", current->pid);
-                }
+            /* Xác thực Token từ arg2 của prctl */
+            uint64_t client_token = (uint64_t)args->arg2;
+            uint64_t expected_token = current_nonce ^ HEO_SECRET_SALT;
+            if (client_token == expected_token) {
+                authorized_task_ptr = task_now;
+                args->ret = 0x1337; /* Success token */
+                pr_info("[HEO-KPM] Authentication SUCCESS! Task 0x%lx granted Ring 0 Sovereign privilege.\n", task_now);
+            } else {
+                args->ret = -1;
+                pr_warn("[HEO-KPM] Auth FAILED: token mismatch from Task 0x%lx!\n", task_now);
             }
             break;
         }
 
         case HEO_CMD_STATUS: {
-            /* Trả về trạng thái Ring 0 */
-            int status = (authorized_heo_tgid != 0 && authorized_heo_tgid == current->tgid) ? 1 : 0;
-            if (user_buf) {
-                copy_to_user(user_buf, &status, sizeof(int));
+            /* Trả về 1 nếu task hiện tại đã được phong ấn đặc quyền Ring 0 */
+            if (authorized_task_ptr != 0 && authorized_task_ptr == task_now) {
+                args->ret = 1;
+            } else {
+                args->ret = 0;
             }
             break;
         }
 
         case HEO_CMD_FORCE_YAMA_OFF: {
-            /* Chỉ cho phép nếu đã xác thực thành công */
-            if (authorized_heo_tgid == current->tgid) {
-                pr_info("[HEO-KPM] Ring 0: Unlocking Yama ptrace & memory restrictions for HEO session\n");
+            if (authorized_task_ptr == task_now) {
+                pr_info("[HEO-KPM] Ring 0: Unlocking Yama restrictions for authorized HEO session\n");
+                args->ret = 0;
+            } else {
+                args->ret = -1;
             }
             break;
         }
 
         default:
+            args->ret = -1;
             break;
     }
 }
@@ -116,7 +122,7 @@ static long heo_companion_init(const char *args, const char *event, void *__user
 static long heo_companion_exit(void *__user reserved) {
     pr_info("[HEO-KPM] Unloading HEO Ring 0 Companion...\n");
     inline_unhook_syscalln(__NR_prctl, before_prctl_hook, 0);
-    authorized_heo_tgid = 0;
+    authorized_task_ptr = 0;
     return 0;
 }
 
