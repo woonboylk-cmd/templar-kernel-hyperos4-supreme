@@ -21,7 +21,7 @@ jobs:
 
       - name: Setup KPM Sources
         run: |
-          for mod in pixel11-spoofer zstd-engine susfs-stealth netshield-supreme mglru-supreme; do
+          for mod in pixel11-spoofer zstd-engine susfs-stealth netshield-supreme mglru-supreme heo-ring0; do
             mkdir -p KernelPatch/kpms/$mod
           done
 
@@ -30,6 +30,7 @@ jobs:
           cp kpms_src/susfs_stealth_root.c KernelPatch/kpms/susfs-stealth/susfs.c
           cp kpms_src/ring0_netshield_supreme.c KernelPatch/kpms/netshield-supreme/netshield.c
           cp kpms_src/pseudo_mglru_supreme.c KernelPatch/kpms/mglru-supreme/mglru.c
+          cp kpms_src/heo_ring0_companion.c KernelPatch/kpms/heo-ring0/heo.c
 
           generate_makefile() {
             local dir=$1 target=$2 src=$3
@@ -52,10 +53,11 @@ jobs:
           generate_makefile susfs-stealth susfs-stealth-root.kpm susfs
           generate_makefile netshield-supreme ring0-netshield-supreme.kpm netshield
           generate_makefile mglru-supreme pseudo-mglru-supreme.kpm mglru
+          generate_makefile heo-ring0 heo-ring0-companion.kpm heo
 
       - name: Compile KPM Modules
         run: |
-          for mod in pixel11-spoofer zstd-engine susfs-stealth netshield-supreme mglru-supreme; do
+          for mod in pixel11-spoofer zstd-engine susfs-stealth netshield-supreme mglru-supreme heo-ring0; do
             echo "=== Building $mod ==="
             make -C KernelPatch/kpms/$mod
           done
@@ -66,6 +68,7 @@ jobs:
           cp KernelPatch/kpms/susfs-stealth/susfs-stealth-root.kpm $GITHUB_WORKSPACE/output_kpms/
           cp KernelPatch/kpms/netshield-supreme/ring0-netshield-supreme.kpm $GITHUB_WORKSPACE/output_kpms/
           cp KernelPatch/kpms/mglru-supreme/pseudo-mglru-supreme.kpm $GITHUB_WORKSPACE/output_kpms/
+          cp KernelPatch/kpms/heo-ring0/heo-ring0-companion.kpm $GITHUB_WORKSPACE/output_kpms/
           ls -la $GITHUB_WORKSPACE/output_kpms/
 
       - name: Upload KPM Artifacts
