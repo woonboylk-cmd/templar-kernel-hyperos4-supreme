@@ -57,20 +57,22 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
     switch (cmd) {
         case HEO_CMD_GET_CHALLENGE: {
-            /* Sinh nonce ngẫu nhiên 64-bit */
+            /* Sinh nonce ngẫu nhiên 31-bit tương thích hoàn toàn với int return của android.system.Os.prctl */
             current_nonce = (current_nonce * 6364136223846793005ULL) + 1442695040888963407ULL + task_now;
-            args->ret = (long)current_nonce;
-            pr_info("[HEO-KPM] Nonce challenge issued via register: 0x%llx\n", current_nonce);
+            uint32_t nonce32 = (uint32_t)(current_nonce & 0x7FFFFFFFU);
+            args->ret = (long)nonce32;
+            pr_info("[HEO-KPM] Nonce challenge issued via register: 0x%x\n", nonce32);
             break;
         }
 
         case HEO_CMD_VERIFY_AUTH: {
-            /* Xác thực Token từ arg2 của prctl */
+            /* Xác thực Token từ arg2 của prctl (arg3 trong Java Os.prctl) */
             uint64_t client_token = (uint64_t)args->arg2;
-            uint64_t expected_token = current_nonce ^ HEO_SECRET_SALT;
+            uint32_t nonce32 = (uint32_t)(current_nonce & 0x7FFFFFFFU);
+            uint64_t expected_token = ((uint64_t)nonce32) ^ HEO_SECRET_SALT;
             if (client_token == expected_token) {
                 authorized_task_ptr = task_now;
-                args->ret = 0x1337; /* Success token */
+                args->ret = 0x1337; /* Success token (4919) */
                 pr_info("[HEO-KPM] Authentication SUCCESS! Task 0x%lx granted Ring 0 Sovereign privilege.\n", task_now);
             } else {
                 args->ret = -1;
