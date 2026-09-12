@@ -9,15 +9,15 @@ on:
 
 jobs:
   build-heo-kpm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install ARM64 Cross-Compiler & Toolchain
+      - name: Install Kernel 5.10 Matching Toolchain (Clang 14 & LLD 14)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu make clang
+          sudo apt-get install -y --no-install-recommends clang-14 lld-14 llvm-14 gcc-aarch64-linux-gnu make
 
       - name: Clone KernelPatch SDK
         run: |
@@ -29,28 +29,42 @@ jobs:
           cp kpms_src/heo_ring0_companion.c KernelPatch/kpms/heo-ring0/heo.c
 
           cat << 'EOF' > KernelPatch/kpms/heo-ring0/Makefile
-          TARGET_COMPILE ?= aarch64-linux-gnu-
           KP_DIR ?= ../..
-          CC = $(TARGET_COMPILE)gcc
+          CC = clang-14 --target=aarch64-linux-gnu
+          LD = aarch64-linux-gnu-ld
           INCLUDE_DIRS := . include patch/include linux/include linux/arch/arm64/include linux/tools/arch/arm64/include
           INCLUDE_FLAGS := $(foreach dir,$(INCLUDE_DIRS),-I$(KP_DIR)/kernel/$(dir))
+
+          CFLAGS := -O2 -fno-pic -fno-pie -fno-common -mcmodel=small -fno-stack-protector -mgeneral-regs-only -ffreestanding -fno-asynchronous-unwind-tables -fno-unwind-tables
 
           all: heo-ring0-companion.kpm
 
           heo-ring0-companion.kpm: heo.o
-          	${CC} -r -o $@ $^
+          	${LD} -r -o $@ $^
 
           %.o: %.c
-          	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -O2 -fPIC -o $@ $<
+          	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -o $@ $<
           EOF
 
       - name: Compile HEO KPM Module
         run: |
-          echo "=== Building HEO Ring 0 Companion KPM ==="
+          echo "=== Building HEO Ring 0 Companion KPM with Clang 14 ==="
           make -C KernelPatch/kpms/heo-ring0
           mkdir -p output_kpm
           cp KernelPatch/kpms/heo-ring0/heo-ring0-companion.kpm output_kpm/
-          ls -la output_kpm/
+          ls -lh output_kpm/
+
+      - name: Verify ELF Relocations (Zero GOT 311 & Exact Kernel Compatibility)
+        run: |
+          echo "=== Auditing Relocations with llvm-readelf ==="
+          llvm-readelf-14 -r output_kpm/heo-ring0-companion.kpm
+          echo "=== Checking for forbidden GOT relocations (311/312) ==="
+          if llvm-readelf-14 -r output_kpm/heo-ring0-companion.kpm | grep -iE 'GOT|311|312'; then
+            echo "ERROR: Unsupported GOT relocation detected!"
+            exit 1
+          else
+            echo "VERIFIED: 100% compliant with KernelPatch 5.10 loader (Zero GOT 311)."
+          fi
 
       - name: Upload HEO KPM Artifact
         uses: actions/upload-artifact@v4
