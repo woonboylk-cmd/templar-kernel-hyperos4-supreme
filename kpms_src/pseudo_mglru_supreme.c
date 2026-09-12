@@ -17,7 +17,6 @@
 #include <kallsyms.h>
 #include <hook.h>
 #include <linux/printk.h>
-#include <linux/types.h>
 
 KPM_NAME("pseudo-mglru-supreme");
 KPM_VERSION("2.0.0");
@@ -50,7 +49,7 @@ static int orig_boost_dur = 0;
 static int orig_limit_bg = 0;
 
 /* get_scan_count function pointer */
-static void *p_get_scan_count = NULL;
+static void *p_get_scan_count = (void *)0;
 
 static int resolve_and_set_int(const char *name, int target, int **ptr_out, int *orig_out) {
     *ptr_out = (int *)kallsyms_lookup_name(name);
@@ -125,7 +124,7 @@ static long mglru_init(const char *args, const char *event, void *reserved) {
     /* --- Layer 3: Ring 0 Generational Reclaim Hook (get_scan_count) --- */
     p_get_scan_count = (void *)kallsyms_lookup_name("get_scan_count");
     if (p_get_scan_count) {
-        hook_err_t err = hook_wrap3(p_get_scan_count, NULL, after_get_scan_count, NULL);
+        hook_err_t err = hook_wrap3(p_get_scan_count, (void *)0, after_get_scan_count, (void *)0);
         if (!err) {
             pr_info("[KPM-MGLRU] Layer 3 Hook get_scan_count ACTIVE (Multi-Gen LRU Emulation enabled)\n");
             ok++;
@@ -149,7 +148,7 @@ static long mglru_exit(void *reserved) {
 
     /* Unhook Layer 3 */
     if (p_get_scan_count) {
-        hook_unwrap(p_get_scan_count, NULL, after_get_scan_count);
+        hook_unwrap(p_get_scan_count, (void *)0, after_get_scan_count);
         pr_info("[KPM-MGLRU] Layer 3 unhooked successfully.\n");
     }
 
