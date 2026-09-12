@@ -1,14 +1,14 @@
-name: Build HEO Ring 0 Sovereign KPM (Xiaomi 12S)
+name: Build HEO & Arsenal Ring 0 KPMs (Xiaomi 12S)
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - 'kpms_src/heo_ring0_companion.c'
+      - 'kpms_src/**'
       - '.github/workflows/build-heo-kpm.yml'
 
 jobs:
-  build-heo-kpm:
+  build-kpms:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout Repository
@@ -17,18 +17,23 @@ jobs:
       - name: Install Kernel 5.10 Matching Toolchain (Clang 14 & LLD 14)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends clang-14 lld-14 llvm-14 gcc-aarch64-linux-gnu make
+          sudo apt-get install -y --no-install-recommends clang-14 lld-14 llvm-14 gcc-aarch64-linux-gnu make zip
 
       - name: Clone KernelPatch SDK
         run: |
           git clone --depth=1 https://github.com/bmax121/KernelPatch.git
 
-      - name: Setup HEO KPM Workspace
+      - name: Setup Multi-KPM Workspace
         run: |
-          mkdir -p KernelPatch/kpms/heo-ring0
-          cp kpms_src/heo_ring0_companion.c KernelPatch/kpms/heo-ring0/heo.c
+          mkdir -p KernelPatch/kpms/arsenal
+          cp kpms_src/heo_ring0_companion.c KernelPatch/kpms/arsenal/heo-ring0-companion.c
+          cp kpms_src/pixel11_camera_safe_spoofer.c KernelPatch/kpms/arsenal/pixel11-camera-safe-spoofer.c
+          cp kpms_src/pseudo_mglru_supreme.c KernelPatch/kpms/arsenal/pseudo-mglru-supreme.c
+          cp kpms_src/ring0_netshield_supreme.c KernelPatch/kpms/arsenal/ring0-netshield-supreme.c
+          cp kpms_src/susfs_stealth_root.c KernelPatch/kpms/arsenal/susfs-stealth-root.c
+          cp kpms_src/zstd_memory_engine.c KernelPatch/kpms/arsenal/zstd-memory-engine.c
 
-          cat << 'EOF' > KernelPatch/kpms/heo-ring0/Makefile
+          cat << 'EOF' > KernelPatch/kpms/arsenal/Makefile
           KP_DIR ?= ../..
           CC = clang-14 --target=aarch64-linux-gnu
           LD = aarch64-linux-gnu-ld
@@ -37,37 +42,57 @@ jobs:
 
           CFLAGS := -O2 -fno-pic -fno-pie -fno-common -mcmodel=small -fno-stack-protector -mgeneral-regs-only -ffreestanding -fno-asynchronous-unwind-tables -fno-unwind-tables
 
-          all: heo-ring0-companion.kpm
+          KPMS := heo-ring0-companion.kpm \
+                  pixel11-camera-safe-spoofer.kpm \
+                  pseudo-mglru-supreme.kpm \
+                  ring0-netshield-supreme.kpm \
+                  susfs-stealth-root.kpm \
+                  zstd-memory-engine.kpm
 
-          heo-ring0-companion.kpm: heo.o
+          all: $(KPMS)
+
+          %.kpm: %.o
           	${LD} -r -o $@ $^
 
           %.o: %.c
           	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -o $@ $<
           EOF
 
-      - name: Compile HEO KPM Module
+      - name: Compile All KPM Modules
         run: |
-          echo "=== Building HEO Ring 0 Companion KPM with Clang 14 ==="
-          make -C KernelPatch/kpms/heo-ring0
-          mkdir -p output_kpm
-          cp KernelPatch/kpms/heo-ring0/heo-ring0-companion.kpm output_kpm/
-          ls -lh output_kpm/
+          echo "=== Building All 6 KernelPatch Modules with Clang 14 ==="
+          make -C KernelPatch/kpms/arsenal
+          mkdir -p output_kpms
+          cp KernelPatch/kpms/arsenal/*.kpm output_kpms/
+          ls -lh output_kpms/
 
-      - name: Verify ELF Relocations (Zero GOT 311 & Exact Kernel Compatibility)
+      - name: Verify ELF Relocations (Zero GOT 311/312 for all modules)
         run: |
-          echo "=== Auditing Relocations with llvm-readelf ==="
-          llvm-readelf-14 -r output_kpm/heo-ring0-companion.kpm
-          echo "=== Checking for forbidden GOT relocations (311/312) ==="
-          if llvm-readelf-14 -r output_kpm/heo-ring0-companion.kpm | grep -iE 'GOT|311|312'; then
-            echo "ERROR: Unsupported GOT relocation detected!"
+          echo "=== Auditing Relocations for all KPMs with llvm-readelf ==="
+          FAILED=0
+          for kpm in output_kpms/*.kpm; do
+            echo "--- Checking $(basename $kpm) ---"
+            llvm-readelf-14 -r "$kpm"
+            if llvm-readelf-14 -r "$kpm" | grep -iE 'GOT|311|312'; then
+              echo "ERROR: Unsupported GOT relocation detected in $kpm!"
+              FAILED=1
+            fi
+          done
+          if [ $FAILED -ne 0 ]; then
             exit 1
-          else
-            echo "VERIFIED: 100% compliant with KernelPatch 5.10 loader (Zero GOT 311)."
           fi
+          echo "VERIFIED: All 6 KPMs are 100% compliant with KernelPatch 5.10 loader (Zero GOT 311)."
 
-      - name: Upload HEO KPM Artifact
+      - name: Package KPM Arsenal Archive
+        run: |
+          cd output_kpms
+          zip -9 ../kpm-arsenal-kernel5.10-SM8475.zip *.kpm
+          cd ..
+
+      - name: Upload KPM Arsenal Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: HEO-Ring0-Companion-KPM-mayfly
-          path: output_kpm/heo-ring0-companion.kpm
+          name: KPM-Arsenal-Kernel5.10-SM8475
+          path: |
+            output_kpms/*.kpm
+            kpm-arsenal-kernel5.10-SM8475.zip
