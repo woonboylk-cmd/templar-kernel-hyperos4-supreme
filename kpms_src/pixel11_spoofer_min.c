@@ -1,15 +1,16 @@
 ﻿/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * KPM: Pixel 11 Pro XL Identity Spoofer — Hardened Edition v3.2
+ * KPM: Pixel 11 Pro XL Identity Spoofer — Hardened Edition v3.3
  * Target: Xiaomi 12S (mayfly) - Snapdragon 8+ Gen 1 (SM8475) - Linux 5.10.x
  * Architecture: KernelPatch (Ring 0 EL1)
  *
- * Capabilities:
+ * Full Feature Matrix from 11.c & Pixel Spoofer Suite:
  * 1. 3 Syscall Hooks: openat (56), openat2 (437), readlinkat (78 after).
- * 2. Early-Boot & Init Guard: NEVER intercepts init (PID 1), swapper, or system daemons before /data is mounted.
- * 3. Leica Camera Whitelist: Camera & gallery processes read genuine build.prop (zero camera crashes).
- * 4. Extable Safe: zero kernel pointer dereferences, copy_to/from_user extable bounds protected.
- * 5. Inlined kpm_memcpy / kpm_memset: Zero external compiler BL dependencies, zero GOT 311.
+ * 2. Early-Boot & System Daemon Guard: NEVER intercepts init (PID 1), swapper, vold, apexd before /data is mounted.
+ * 3. Full Leica Camera Whitelist: Camera, gallery, and vendor camera HALs read genuine Xiaomi build.prop.
+ * 4. Extable Safe: zero kernel dereferences, copy_to/from_user extable bounds protected.
+ * 5. Inlined kpm_memcpy / kpm_memset: Zero external BL compiler calls, zero GOT 311 relocations.
+ * 6. Suffix & Boundary Validation: accepts both relative "build.prop" and absolute paths; rejects vendor/odm/apex.
  */
 
 #include <compiler.h>
@@ -22,10 +23,10 @@
 #include <asm/current.h>
 
 KPM_NAME("pixel11-spoofer");
-KPM_VERSION("3.2.0");
+KPM_VERSION("3.3.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Antigravity & vric");
-KPM_DESCRIPTION("Pixel 11 Pro XL Identity Spoofer v3.2 - Hardened Extable Safe, Leica Whitelist, Early-Boot Guard");
+KPM_DESCRIPTION("Pixel 11 Pro XL Identity Spoofer v3.3 - Hardened Extable Safe, Full Camera Whitelist, Early-Boot Guard");
 
 #ifndef __NR_openat
 #define __NR_openat     56
@@ -72,6 +73,12 @@ static inline int s_cmp(const char *a, const char *b) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+static inline int s_ncmp(const char *a, const char *b, size_t n) {
+    while (n && *a && *a == *b) { a++; b++; n--; }
+    if (n == 0) return 0;
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
 static inline int starts_with(const char *p, const char *pfx) {
     if (!p || !pfx) return 0;
     while (*pfx) { if (*p++ != *pfx++) return 0; }
@@ -99,12 +106,16 @@ static unsigned long (*p_cfu)(void *, const void *, unsigned long) = (void *)0;
 static unsigned long (*p_ctu)(void *, const void *, unsigned long) = (void *)0;
 static char *(*p_get_task_comm)(char *buf, unsigned long buf_size, void *tsk) = (void *)0;
 
-/* Leica Camera Whitelist */
+/* Leica Camera & Hardware Whitelist (from 11.c) */
 static const char *camera_whitelist[] = {
     "camera",
-    "qti.camera",
     "cameraserver",
+    "media.camera",
+    "qti.camera",
     "vtcamera",
+    "vendor.qti.camera",
+    "vendor.xiaomi.hardware.camera",
+    "android.hardware.camera",
     "mm-qcamera",
     "miui.gallery",
     "gallery"
@@ -136,21 +147,22 @@ static inline int is_early_boot_daemon(const char *comm) {
 
 static inline int ends_with_build_prop(const char *p) {
     size_t n = s_len(p);
-    if (n >= 11 && p[n-11]=='/' && p[n-10]=='b' && p[n-9]=='u' && p[n-8]=='i' &&
-        p[n-7]=='l'  && p[n-6]=='d' && p[n-5]=='.' && p[n-4]=='p' &&
-        p[n-3]=='r'  && p[n-2]=='o' && p[n-1]=='p')
+    if (n >= 11 && s_ncmp(p + n - 10, "build.prop", 10) == 0 && p[n-11] == '/')
         return 1;
-    if (n == 10 && p[0]=='b' && p[1]=='u' && p[2]=='i' && p[3]=='l' &&
-        p[4]=='d' && p[5]=='.' && p[6]=='p' && p[7]=='r' && p[8]=='o' && p[9]=='p')
+    if (n == 10 && s_ncmp(p, "build.prop", 10) == 0)
         return 1;
     return 0;
 }
 
 static inline int path_excluded(const char *p) {
-    return starts_with(p, "/vendor/")   ||
-           starts_with(p, "/odm/")      ||
-           starts_with(p, "/apex/")     ||
-           starts_with(p, "/data/adb/");
+    if (str_contains(p, "vendor"))           return 1;
+    if (str_contains(p, "odm"))              return 1;
+    if (str_contains(p, "apex"))             return 1;
+    if (starts_with(p, "/sdcard/"))          return 1;
+    if (starts_with(p, "/storage/"))         return 1;
+    if (starts_with(p, "/data/adb/"))        return 1;
+    if (s_cmp(p, SPOOF_PATH) == 0)           return 1;
+    return 0;
 }
 
 static inline int is_proc_fd_path(const char *p) {
@@ -182,6 +194,9 @@ static void spoof_common(void *user_path_ptr) {
 
     if (!ends_with_build_prop(path)) return;
     if (path_excluded(path))         return;
+
+    size_t path_len = s_len(path);
+    if (path_len < SPOOF_PATH_LEN)   return; /* Safe: do not overwrite if user buffer < 18B */
 
     /* Overwrite path in userspace memory with spoof path */
     p_ctu(user_path_ptr, SPOOF_PATH, SPOOF_PATH_LEN + 1);
@@ -262,7 +277,7 @@ static long init(const char *args, const char *event, void *reserved) {
     inline_hook_syscalln(__NR_openat2,    4, before_openat2, NULL, NULL);
     inline_hook_syscalln(__NR_readlinkat, 4, NULL, after_readlinkat, NULL);
 
-    pr_info("[p11-spoofer] Pixel 11 Pro XL Identity Spoofer v3.2 ACTIVE\n");
+    pr_info("[p11-spoofer] Pixel 11 Pro XL Identity Spoofer v3.3 ACTIVE\n");
     return 0;
 }
 

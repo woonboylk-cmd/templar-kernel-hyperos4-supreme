@@ -1,4 +1,4 @@
-﻿/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * KPM: HEO Ring 0 Sovereign Companion v5.1 — Pure Ring 0 Engine
  * Target: Xiaomi 12S (mayfly) - Snapdragon 8+ Gen 1 (SM8475) - Linux Kernel 5.10.x
@@ -80,6 +80,14 @@ static __always_inline int kpm_strcmp(const char *a, const char *b)
 #define HEO_CMD_RESOLVE_SYMBOL    0x0E  /* Resolve any kernel symbol address */
 #define HEO_CMD_SET_TASK_AFFINITY 0x0F  /* Hardware CPU pinning directly via kernel */
 
+/* 6 Sovereign Superpowers (matching Ring0SovereignBridge.kt) */
+#define HEO_CMD_KREAD_CHAIN       0x10
+#define HEO_CMD_KALLSYMS_LEAK     0x11
+#define HEO_CMD_LIST_WALK         0x12
+#define HEO_CMD_V2P               0x13
+#define HEO_CMD_PREAD             0x14
+#define HEO_CMD_STRUCT_READ       0x15
+
 /* Pre-shared secret salt: 0xA55A1337BEEFCAFEULL */
 #define HEO_SECRET_SALT          0xA55A1337BEEFCAFEULL
 #define MAX_FORK_RULES           16
@@ -93,7 +101,7 @@ struct heo_fork_rule {
 
 struct heo_kernel_telemetry {
     uint32_t magic;              /* 0x48454F30 ('HEO0') */
-    uint32_t version;            /* 0x0510 */
+    uint32_t version;            /* 0x0520 */
     uint64_t uptime_jiffies;     /* Kernel jiffies */
     uint32_t cfs_latency;        /* sysctl_sched_latency */
     uint32_t cfs_min_gran;       /* sysctl_sched_min_granularity */
@@ -112,6 +120,56 @@ struct heo_task_inspect_info {
     uint64_t task_ptr;
 };
 
+/* Superpower 1: Chain Read */
+struct heo_chain_req {
+    uint64_t base_ptr;
+    uint32_t num_hops;
+    uint32_t read_len;
+    uint32_t offsets[8];
+};
+
+struct heo_chain_resp {
+    uint64_t final_ptr;
+    uint32_t bytes_read;
+    uint8_t  data[1024];
+};
+
+/* Superpower 2: Kallsyms Leak */
+struct heo_kallsyms_req {
+    char filter[32];
+    uint32_t max_entries;
+};
+
+struct heo_sym_entry {
+    char name[48];
+    uint64_t addr;
+};
+
+struct heo_kallsyms_resp {
+    uint32_t count;
+    struct heo_sym_entry entries[16];
+};
+
+/* Superpower 3: List Walk */
+struct heo_list_walk_req {
+    uint64_t head_ptr;
+    uint32_t offset_in_struct;
+    uint32_t max_count;
+};
+
+struct heo_list_walk_resp {
+    uint32_t count;
+    uint64_t entries[32];
+};
+
+/* Compact shared response union buffer: Keeps total .bss under 2.1KB */
+static union {
+    struct heo_chain_resp chain;
+    struct heo_kallsyms_resp kallsyms;
+    struct heo_list_walk_resp list_walk;
+    uint8_t raw[1100];
+} u_resp_buf;
+
 /* Module State */
 static unsigned long authorized_task_ptr = 0;
 static uint64_t current_nonce = 0x1337CAFEBEEFULL;
@@ -128,6 +186,8 @@ static char *(*p_get_task_comm)(char *buf, unsigned long buf_size, void *tsk) = 
 static unsigned long (*p_copy_to_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static unsigned long (*p_copy_from_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static long (*p_knofault)(void *dst, const void *src, size_t size) = (void *)0;
+static void *(*p_ioremap_cache)(unsigned long phys_addr, size_t size) = (void *)0;
+static void (*p_iounmap)(void *addr) = (void *)0;
 static unsigned long *p_jiffies = (void *)0;
 
 /* CFS Sched Tunables Pointers & Originals */
@@ -659,6 +719,186 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
             break;
         }
 
+        /* ═══ SUPERPOWER 0x10: Multi-hop Pointer Chasing ═══ */
+        case HEO_CMD_KREAD_CHAIN: {
+            if (authorized_task_ptr == task_now) {
+                void *user_req = (void *)syscall_argn(args, 2);
+                void *user_resp = (void *)syscall_argn(args, 3);
+                if (!user_req || !user_resp || !p_copy_from_user || !p_copy_to_user) {
+                    args->ret = (uint64_t)-22;
+                    break;
+                }
+                struct heo_chain_req req;
+                if (p_copy_from_user(&req, user_req, sizeof(req)) != 0) { args->ret = (uint64_t)-14; break; }
+                if (req.num_hops > 8 || req.read_len > sizeof(u_resp_buf.chain.data)) { args->ret = (uint64_t)-22; break; }
+
+                uint64_t curr = req.base_ptr;
+                int failed = 0;
+                for (uint32_t h = 0; h < req.num_hops; h++) {
+                    uint64_t next_addr = curr + req.offsets[h];
+                    uint64_t deref_val = 0;
+                    if (p_knofault) {
+                        if (p_knofault(&deref_val, (const void *)next_addr, sizeof(deref_val)) != 0) {
+                            failed = 1; break;
+                        }
+                    } else {
+                        deref_val = *(const uint64_t *)next_addr;
+                    }
+                    curr = deref_val;
+                }
+                if (failed || curr == 0) { args->ret = (uint64_t)-14; break; }
+
+                kpm_memset(&u_resp_buf.chain, 0, sizeof(u_resp_buf.chain));
+                u_resp_buf.chain.final_ptr = curr;
+                if (req.read_len > 0) {
+                    if (p_knofault) {
+                        if (p_knofault(u_resp_buf.chain.data, (const void *)curr, req.read_len) == 0) {
+                            u_resp_buf.chain.bytes_read = req.read_len;
+                        }
+                    } else {
+                        kpm_memcpy(u_resp_buf.chain.data, (const void *)curr, req.read_len);
+                        u_resp_buf.chain.bytes_read = req.read_len;
+                    }
+                }
+                args->ret = (p_copy_to_user(user_resp, &u_resp_buf.chain, sizeof(u_resp_buf.chain)) == 0) ? 0 : (uint64_t)-14;
+            } else {
+                args->ret = (uint64_t)-1;
+            }
+            break;
+        }
+
+        /* ═══ SUPERPOWER 0x11: Uncensored Kallsyms Leak ═══ */
+        case HEO_CMD_KALLSYMS_LEAK: {
+            if (authorized_task_ptr == task_now) {
+                void *user_filter = (void *)syscall_argn(args, 2);
+                void *user_resp = (void *)syscall_argn(args, 3);
+                if (!user_filter || !user_resp || !p_copy_from_user || !p_copy_to_user) {
+                    args->ret = (uint64_t)-22;
+                    break;
+                }
+                struct heo_kallsyms_req req;
+                if (p_copy_from_user(&req, user_filter, sizeof(req)) != 0) { args->ret = (uint64_t)-14; break; }
+                req.filter[31] = '\0';
+                kpm_memset(&u_resp_buf.kallsyms, 0, sizeof(u_resp_buf.kallsyms));
+
+                unsigned long addr = (unsigned long)kallsyms_lookup_name(req.filter);
+                if (addr) {
+                    u_resp_buf.kallsyms.count = 1;
+                    kpm_memcpy(u_resp_buf.kallsyms.entries[0].name, req.filter, 32);
+                    u_resp_buf.kallsyms.entries[0].addr = addr;
+                }
+                args->ret = (p_copy_to_user(user_resp, &u_resp_buf.kallsyms, sizeof(u_resp_buf.kallsyms)) == 0) ? 0 : (uint64_t)-14;
+            } else {
+                args->ret = (uint64_t)-1;
+            }
+            break;
+        }
+
+        /* ═══ SUPERPOWER 0x12: Safe list_head Traversal ═══ */
+        case HEO_CMD_LIST_WALK: {
+            if (authorized_task_ptr == task_now) {
+                void *user_req = (void *)syscall_argn(args, 2);
+                void *user_resp = (void *)syscall_argn(args, 3);
+                if (!user_req || !user_resp || !p_copy_from_user || !p_copy_to_user) {
+                    args->ret = (uint64_t)-22;
+                    break;
+                }
+                struct heo_list_walk_req req;
+                if (p_copy_from_user(&req, user_req, sizeof(req)) != 0) { args->ret = (uint64_t)-14; break; }
+                if (req.max_count > 32) req.max_count = 32;
+
+                kpm_memset(&u_resp_buf.list_walk, 0, sizeof(u_resp_buf.list_walk));
+                uint64_t curr = req.head_ptr;
+                uint32_t c = 0;
+                while (curr && c < req.max_count) {
+                    uint64_t next_node = 0;
+                    if (p_knofault) {
+                        if (p_knofault(&next_node, (const void *)curr, sizeof(next_node)) != 0) break;
+                    } else {
+                        next_node = *(const uint64_t *)curr;
+                    }
+                    if (!next_node || next_node == req.head_ptr) break;
+                    u_resp_buf.list_walk.entries[c++] = next_node - req.offset_in_struct;
+                    curr = next_node;
+                }
+                u_resp_buf.list_walk.count = c;
+                args->ret = (p_copy_to_user(user_resp, &u_resp_buf.list_walk, sizeof(u_resp_buf.list_walk)) == 0) ? 0 : (uint64_t)-14;
+            } else {
+                args->ret = (uint64_t)-1;
+            }
+            break;
+        }
+
+        /* ═══ SUPERPOWER 0x13: ARM64 Virtual to Physical Address (V2P) ═══ */
+        case HEO_CMD_V2P: {
+            if (authorized_task_ptr == task_now) {
+                uint64_t vaddr = (uint64_t)syscall_argn(args, 2);
+                uint64_t par_val = 0;
+                /* Execute AT S1E1R instruction safely */
+                asm volatile("at s1e1r, %1\n\tmrs %0, par_el1" : "=r"(par_val) : "r"(vaddr) : "memory");
+                if (par_val & 1ULL) {
+                    args->ret = 0; /* Translation fault */
+                } else {
+                    args->ret = (par_val & 0x0000FFFFFFFFF000ULL) | (vaddr & 0xFFFULL);
+                }
+            } else {
+                args->ret = (uint64_t)-1;
+            }
+            break;
+        }
+
+        /* ═══ SUPERPOWER 0x14: Physical RAM Reader via ioremap ═══ */
+        case HEO_CMD_PREAD: {
+            if (authorized_task_ptr == task_now) {
+                unsigned long paddr = (unsigned long)syscall_argn(args, 2);
+                void *user_buf = (void *)syscall_argn(args, 3);
+                unsigned long len = (unsigned long)syscall_argn(args, 4);
+                if (!user_buf || !p_copy_to_user || !p_ioremap_cache || !p_iounmap || len == 0 || len > sizeof(u_resp_buf.raw)) {
+                    args->ret = (uint64_t)-22;
+                    break;
+                }
+                void *mapped = p_ioremap_cache(paddr, len);
+                if (!mapped) { args->ret = (uint64_t)-14; break; }
+                if (p_knofault) {
+                    p_knofault(u_resp_buf.raw, mapped, len);
+                } else {
+                    kpm_memcpy(u_resp_buf.raw, mapped, len);
+                }
+                p_iounmap(mapped);
+                args->ret = (p_copy_to_user(user_buf, u_resp_buf.raw, len) == 0) ? 0 : (uint64_t)-14;
+            } else {
+                args->ret = (uint64_t)-1;
+            }
+            break;
+        }
+
+        /* ═══ SUPERPOWER 0x15: Dynamic Struct Offset Reader ═══ */
+        case HEO_CMD_STRUCT_READ: {
+            if (authorized_task_ptr == task_now) {
+                uint64_t struct_base = (uint64_t)syscall_argn(args, 2);
+                uint32_t offset = (uint32_t)syscall_argn(args, 3);
+                void *user_buf = (void *)syscall_argn(args, 4);
+                uint32_t len = (uint32_t)syscall_argn(args, 5);
+                if (!user_buf || !p_copy_to_user || len == 0 || len > sizeof(u_resp_buf.raw)) {
+                    args->ret = (uint64_t)-22;
+                    break;
+                }
+                uint64_t target_field = struct_base + offset;
+                if (p_knofault) {
+                    if (p_knofault(u_resp_buf.raw, (const void *)target_field, len) != 0) {
+                        args->ret = (uint64_t)-14;
+                        break;
+                    }
+                } else {
+                    kpm_memcpy(u_resp_buf.raw, (const void *)target_field, len);
+                }
+                args->ret = (p_copy_to_user(user_buf, u_resp_buf.raw, len) == 0) ? 0 : (uint64_t)-14;
+            } else {
+                args->ret = (uint64_t)-1;
+            }
+            break;
+        }
+
         default:
             args->ret = (uint64_t)-1;
             break;
@@ -668,7 +908,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 static long heo_companion_init(const char *args, const char *event, void *reserved) {
     (void)args; (void)event; (void)reserved;
 
-    pr_info("[HEO-KPM] ===== Initializing HEO Ring 0 Sovereign Companion v5.1 =====\n");
+    pr_info("[HEO-KPM] ===== Initializing HEO Ring 0 Sovereign Companion v5.2 =====\n");
     pr_info("[HEO-KPM] Target SoC: Snapdragon 8+ Gen 1 (SM8475) | KernelPatch EL1\n");
 
     /* 1. Resolve Core Kernel Helpers with fallback */
@@ -681,6 +921,8 @@ static long heo_companion_init(const char *args, const char *event, void *reserv
     if (!p_copy_from_user) p_copy_from_user = (void *)kallsyms_lookup_name("raw_copy_from_user");
 
     p_knofault = (void *)kallsyms_lookup_name("copy_from_kernel_nofault");
+    p_ioremap_cache = (void *)kallsyms_lookup_name("ioremap_cache");
+    p_iounmap = (void *)kallsyms_lookup_name("iounmap");
 
     p_get_task_comm = (void *)kallsyms_lookup_name("__get_task_comm");
     if (!p_get_task_comm) p_get_task_comm = (void *)kallsyms_lookup_name("get_task_comm");
