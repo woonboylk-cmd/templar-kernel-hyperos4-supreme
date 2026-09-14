@@ -39,7 +39,8 @@ static const char *sus_patterns[] = {
     "/system/xbin/su",
     "/system/bin/su",
     "magisk",
-    "zygisk"
+    "zygisk",
+    "heo_ai"
 };
 #define NUM_SUS_PATTERNS (sizeof(sus_patterns) / sizeof(sus_patterns[0]))
 
@@ -145,26 +146,38 @@ void before_openat_susfs(hook_fargs4_t *args, void *udata) {
 }
 
 static long susfs_stealth_init(const char *args, const char *event, void *reserved) {
-    pr_info("[KPM-SuSFS] ===== Initializing SuSFS Stealth Root v3.0 (Active Cloaker) =====\n");
+    pr_info("[KPM-SuSFS] ===== Initializing SuSFS Stealth Root v3.5 (Multi-Syscall Cloaker) =====\n");
 
     p_copy_from_user = (void *)kallsyms_lookup_name("__arch_copy_from_user");
     p_get_task_comm = (void *)kallsyms_lookup_name("__get_task_comm");
 
     resolve_task_comm_offset();
 
-    hook_err_t err = inline_hook_syscalln(__NR_openat, 4, before_openat_susfs, NULL, NULL);
-    if (err) {
-        pr_err("[KPM-SuSFS] inline_hook_syscalln(__NR_openat) failed: %d\n", err);
-        return -1;
+    hook_err_t err1 = inline_hook_syscalln(__NR_openat, 4, before_openat_susfs, NULL, NULL);
+    if (err1) {
+        pr_err("[KPM-SuSFS] inline_hook_syscalln(__NR_openat) failed: %d\n", err1);
     }
 
-    pr_info("[KPM-SuSFS] Root path cloaking ACTIVE on __NR_openat.\n");
+    hook_err_t err2 = inline_hook_syscalln(__NR_faccessat, 4, before_openat_susfs, NULL, NULL);
+    if (err2) {
+        pr_err("[KPM-SuSFS] inline_hook_syscalln(__NR_faccessat) failed: %d\n", err2);
+    }
+
+    hook_err_t err3 = inline_hook_syscalln(__NR_newfstatat, 4, before_openat_susfs, NULL, NULL);
+    if (err3) {
+        pr_err("[KPM-SuSFS] inline_hook_syscalln(__NR_newfstatat) failed: %d\n", err3);
+    }
+
+    pr_info("[KPM-SuSFS] Root path cloaking ACTIVE (openat=%d, faccessat=%d, newfstatat=%d).\n",
+            !err1, !err2, !err3);
     return 0;
 }
 
 static long susfs_stealth_exit(void *reserved) {
     pr_info("[KPM-SuSFS] Unloading SuSFS Stealth Root...\n");
     inline_unhook_syscalln(__NR_openat, before_openat_susfs, NULL);
+    inline_unhook_syscalln(__NR_faccessat, before_openat_susfs, NULL);
+    inline_unhook_syscalln(__NR_newfstatat, before_openat_susfs, NULL);
     return 0;
 }
 

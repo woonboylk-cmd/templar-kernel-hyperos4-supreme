@@ -165,7 +165,7 @@ void before_openat_spoofer(hook_fargs4_t *args, void *udata) {
 }
 
 static long pixel_spoofer_init(const char *args, const char *event, void *reserved) {
-    pr_info("[KPM-Pixel11] ===== Initializing Pixel 11 Pro XL Spoofer v3.0 (Real Redirection) =====\n");
+    pr_info("[KPM-Pixel11] ===== Initializing Pixel 11 Pro XL Spoofer v3.5 (openat + newfstatat) =====\n");
 
     p_copy_to_user = (void *)kallsyms_lookup_name("__arch_copy_to_user");
     p_copy_from_user = (void *)kallsyms_lookup_name("__arch_copy_from_user");
@@ -173,19 +173,25 @@ static long pixel_spoofer_init(const char *args, const char *event, void *reserv
 
     resolve_task_comm_offset();
 
-    hook_err_t err = inline_hook_syscalln(__NR_openat, 4, before_openat_spoofer, NULL, NULL);
-    if (err) {
-        pr_err("[KPM-Pixel11] inline_hook_syscalln(__NR_openat) failed: %d\n", err);
-        return -1;
+    hook_err_t err1 = inline_hook_syscalln(__NR_openat, 4, before_openat_spoofer, NULL, NULL);
+    if (err1) {
+        pr_err("[KPM-Pixel11] inline_hook_syscalln(__NR_openat) failed: %d\n", err1);
     }
 
-    pr_info("[KPM-Pixel11] In-Place Syscall Redirection ACTIVE. Leica Camera Protected.\n");
+    hook_err_t err2 = inline_hook_syscalln(__NR_newfstatat, 4, before_openat_spoofer, NULL, NULL);
+    if (err2) {
+        pr_err("[KPM-Pixel11] inline_hook_syscalln(__NR_newfstatat) failed: %d\n", err2);
+    }
+
+    pr_info("[KPM-Pixel11] In-Place Syscall Redirection ACTIVE (openat=%d, newfstatat=%d). Leica Camera Protected.\n",
+            !err1, !err2);
     return 0;
 }
 
 static long pixel_spoofer_exit(void *reserved) {
     pr_info("[KPM-Pixel11] Unloading Pixel 11 Pro XL Spoofer...\n");
     inline_unhook_syscalln(__NR_openat, before_openat_spoofer, NULL);
+    inline_unhook_syscalln(__NR_newfstatat, before_openat_spoofer, NULL);
     return 0;
 }
 
