@@ -18,14 +18,31 @@
 #include <linux/printk.h>
 #include <uapi/asm-generic/unistd.h>
 #include <syscall.h>
-#include <linux/string.h>
 #include <asm/current.h>
 
-KPM_NAME("heo-ring0-companion-v5");
-KPM_VERSION("5.0.0");
+KPM_NAME("heo-ring0-companion");
+KPM_VERSION("5.1.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Antigravity & vric");
-KPM_DESCRIPTION("HEO Ring 0 v5.0 — Merged hardened: steering + spoof + introspection");
+KPM_DESCRIPTION("HEO Ring 0 v5.1 — Merged hardened: steering + spoof + introspection");
+
+/* KPM-safe memory helpers: avoids emitting BL memcpy/memset which are
+ * not exported in KernelPatch symbol table (causes ENOENT / rc=-2).
+ * These are inlined by the compiler, zero external symbol dependency. */
+static __always_inline void *kpm_memset(void *dst, int c, unsigned long n)
+{
+    unsigned char *p = (unsigned char *)dst;
+    while (n--) *p++ = (unsigned char)c;
+    return dst;
+}
+
+static __always_inline void *kpm_memcpy(void *dst, const void *src, unsigned long n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    while (n--) *d++ = *s++;
+    return dst;
+}
 
 /* ==========================================================================
  * SECTION 1: CONSTANTS & STRUCTS
@@ -440,7 +457,7 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
             for (int i = 0; i < MAX_FORK_RULES; i++)
                 if (!g_fork_rules[i].enabled) { slot = i; break; }
         if (slot < 0) { args->ret = (uint64_t)-28; break; }
-        __builtin_memcpy(&g_fork_rules[slot], &r, sizeof(r));
+        kpm_memcpy(&g_fork_rules[slot], &r, sizeof(r));
         g_fork_rules[slot].enabled = 1;
         args->ret = 0;
         break;
@@ -457,7 +474,7 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
     case HEO_CMD_CLEAR_FORK_RULES:
         if (authorized_task_ptr != task_now) { args->ret = (uint64_t)-1; break; }
-        __builtin_memset(g_fork_rules, 0, sizeof(g_fork_rules));
+        kpm_memset(g_fork_rules, 0, sizeof(g_fork_rules));
         args->ret = 0;
         break;
 
@@ -527,7 +544,7 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
             args->ret = (uint64_t)-14;   /* addr không đọc được → từ chối ghi */
             break;
         }
-        __builtin_memcpy((void *)ka, s_kwrite_buf, len);
+        kpm_memcpy((void *)ka, s_kwrite_buf, len);
         args->ret = 0;
         break;
     }
@@ -696,7 +713,7 @@ static long init(const char *args, const char *event, void *reserved) {
         return -1;
     }
 
-    __builtin_memset(g_fork_rules, 0, sizeof(g_fork_rules));
+    kpm_memset(g_fork_rules, 0, sizeof(g_fork_rules));
     pr_info("[HEO-KPM] ONLINE — spoof=1, sched=%d, kread=%d\n",
             (p_select_task_rq && g_comm_offset > 0), !!p_knofault);
     return 0;
