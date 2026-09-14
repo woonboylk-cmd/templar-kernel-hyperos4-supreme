@@ -30,6 +30,13 @@ KPM_DESCRIPTION("Pixel 11 Pro XL Identity Spoofer v3.0 - In-Place Syscall Redire
 #define SPOOF_TARGET_PATH "/data/adb/p11.prop"
 #define SPOOF_TARGET_LEN  18
 
+#ifndef __NR_newfstatat
+#define __NR_newfstatat 79
+#endif
+#ifndef __NR_openat
+#define __NR_openat 56
+#endif
+
 static unsigned long (*p_copy_to_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static unsigned long (*p_copy_from_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static char *(*p_get_task_comm)(char *buf, unsigned long buf_size, void *tsk) = (void *)0;

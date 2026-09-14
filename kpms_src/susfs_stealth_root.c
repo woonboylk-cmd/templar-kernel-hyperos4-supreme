@@ -27,6 +27,16 @@ KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Antigravity & vric");
 KPM_DESCRIPTION("SuSFS Stealth Root v3.0 - Kernel-Level Root Cloaking for Untrusted Apps");
 
+#ifndef __NR_newfstatat
+#define __NR_newfstatat 79
+#endif
+#ifndef __NR_faccessat
+#define __NR_faccessat 48
+#endif
+#ifndef __NR_openat
+#define __NR_openat 56
+#endif
+
 static unsigned long (*p_copy_from_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static char *(*p_get_task_comm)(char *buf, unsigned long buf_size, void *tsk) = (void *)0;
 static int g_comm_offset = -1;
