@@ -27,10 +27,10 @@
 #include <asm/current.h>
 
 KPM_NAME("heo-ring0-companion");
-KPM_VERSION("4.0.0");
+KPM_VERSION("4.1.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Antigravity & vric");
-KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v4.0 - Full Introspection, Credential Elevation & Layer 4 Steering");
+KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v4.1.0 - Full Introspection, Credential Elevation & Rock-Solid Safe Architecture");
 
 #define HEO_MAGIC_PRCTL          0x48454F    /* 'HEO' in ASCII */
 
@@ -92,7 +92,6 @@ static uint64_t current_nonce = 0x1337CAFEBEEFULL;
 static struct heo_fork_rule g_fork_rules[MAX_FORK_RULES];
 
 /* Kernel Symbol Function Pointers */
-static void *p_select_task_rq = (void *)0;
 static char *(*p_get_task_comm)(char *buf, unsigned long buf_size, void *tsk) = (void *)0;
 static unsigned long (*p_copy_to_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static unsigned long (*p_copy_from_user)(void *to, const void *from, unsigned long n) = (void *)0;
@@ -131,80 +130,10 @@ static inline int str_contains(const char *haystack, const char *needle) {
 }
 
 /*
- * Layer 4 Dynamic Process Steering Hook
- * Intercepts select_task_rq at microsecond 0 when ANY task forks or wakes up.
- * Completely independent of LSPosed, ART, ptrace, or Zygote!
+ * Ring 0 Sovereign Companion v4.1.0 - Rock-Solid Edition
+ * Scheduler CPU pinning is managed safely via HEO_CMD_SET_TASK_AFFINITY
+ * (Zero lock-inversion, zero scheduler deadlocks, zero watchdog barks).
  */
-static void after_select_task_rq(hook_fargs4_t *args, void *udata) {
-    void *task = (void *)args->arg0;
-    if (!task || !p_get_task_comm) return;
-
-    int target_cpu = (int)args->ret;
-    if (target_cpu < 0 || target_cpu > 7) return;
-
-    char comm[16];
-    p_get_task_comm(comm, sizeof(comm), task);
-    comm[15] = '\0';
-
-    /* 1. Dynamic in-kernel fork rules configured by HEO App & AI Agents */
-    for (int i = 0; i < MAX_FORK_RULES; i++) {
-        if (g_fork_rules[i].enabled && g_fork_rules[i].comm[0] != '\0') {
-            if (str_contains(comm, g_fork_rules[i].comm)) {
-                if (g_fork_rules[i].action == 1) {
-                    /* DEMOTE: Confine to Cortex-A510 Little (Cores 0-2) */
-                    args->ret = (target_cpu % 3);
-                    stat_bloat_demotes++;
-                } else if (g_fork_rules[i].action == 2) {
-                    /* BOOST: Elevate to Cortex-X2 Prime (Core 7, 3.2 GHz) */
-                    args->ret = 7;
-                    stat_ui_boosts++;
-                } else if (g_fork_rules[i].action == 3) {
-                    /* MID_AI: Pin to Cortex-A710 Mid (Cores 4-6, 2.75 GHz) */
-                    args->ret = 4 + (target_cpu % 3);
-                    stat_ai_steers++;
-                }
-                stat_tasks_steered++;
-                return;
-            }
-        }
-    }
-
-    /* 2. Built-in Sovereign Hardened Demotions (Background Parasites) */
-    if (str_contains(comm, "facebook") || str_contains(comm, "katana") ||
-        str_contains(comm, "orca")     || str_contains(comm, "instagram") ||
-        str_contains(comm, "tiktok")   || str_contains(comm, "zhiliao") ||
-        str_contains(comm, "miwallpap")|| str_contains(comm, "earthSuper")) {
-        if (target_cpu >= 3) {
-            args->ret = (target_cpu % 3);
-            stat_bloat_demotes++;
-            stat_tasks_steered++;
-        }
-        return;
-    }
-
-    /* 3. Built-in On-Device AI Engine Pinning (llama-server, Qwen, ExecuTorch) */
-    if (str_contains(comm, "llama") || str_contains(comm, "qwen") ||
-        str_contains(comm, "executor")) {
-        if (target_cpu < 4 || target_cpu == 7) {
-            args->ret = 4 + (target_cpu % 3);
-            stat_ai_steers++;
-            stat_tasks_steered++;
-        }
-        return;
-    }
-
-    /* 4. Built-in Sovereign UI & HEO Master Elevation */
-    if (str_contains(comm, "myapplicat") || str_contains(comm, "heo") ||
-        str_contains(comm, "surfacefl")  || str_contains(comm, "RenderThrea") ||
-        str_contains(comm, "composer-s")) {
-        if (target_cpu < 4) {
-            args->ret = 7; /* Cortex-X2 Prime (3.2 GHz) */
-            stat_ui_boosts++;
-            stat_tasks_steered++;
-        }
-        return;
-    }
-}
 
 /*
  * Syscall prctl Hook (Cầu nối Lệnh Sovereign Ring 0)
@@ -573,30 +502,14 @@ static long heo_companion_init(const char *args, const char *event, void *reserv
         return -1;
     }
 
-    /* 4. Hook select_task_rq (Layer 4 Dynamic Fork Steering Engine) */
-    p_select_task_rq = (void *)kallsyms_lookup_name("select_task_rq");
-    if (p_select_task_rq) {
-        hook_err_t h_err = hook_wrap4(p_select_task_rq, (void *)0, after_select_task_rq, (void *)0);
-        if (h_err == 0) {
-            pr_info("[HEO-KPM] Layer 4 Task Steering Hook ACTIVE on select_task_rq.\n");
-        } else {
-            pr_warn("[HEO-KPM] hook_wrap4(select_task_rq) returned: %d\n", h_err);
-        }
-    } else {
-        pr_warn("[HEO-KPM] select_task_rq symbol not found in kallsyms.\n");
-    }
-
     memset(g_fork_rules, 0, sizeof(g_fork_rules));
-    pr_info("[HEO-KPM] Sovereign Ring 0 Ultimate Superpowers ONLINE (v4.0.0) 👑\n");
+    pr_info("[HEO-KPM] Sovereign Ring 0 Ultimate Superpowers ONLINE (v4.1.0 Rock-Solid) 👑\n");
     return 0;
 }
 
 static long heo_companion_exit(void *reserved) {
     pr_info("[HEO-KPM] Unloading HEO Ring 0 Sovereign Companion...\n");
     inline_unhook_syscalln(__NR_prctl, before_prctl_hook, NULL);
-    if (p_select_task_rq) {
-        hook_unwrap(p_select_task_rq, (void *)0, after_select_task_rq);
-    }
     authorized_task_ptr = 0;
     return 0;
 }
