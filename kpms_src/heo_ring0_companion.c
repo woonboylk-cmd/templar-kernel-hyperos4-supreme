@@ -32,10 +32,10 @@
 #include <asm/current.h>
 
 KPM_NAME("heo-ring0-companion");
-KPM_VERSION("5.2.1");
+KPM_VERSION("5.3.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Antigravity & vric");
-KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v5.2.1 - Pure Ring 0 Engine, 6 Superpowers, Safe Syscall Hook");
+KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v5.3.0 - Pure Ring 0 Engine, 6 Superpowers, Safe Syscall Hook");
 
 /* KPM-safe memory helpers: inlined by compiler, zero external BL memcpy/memset */
 static __always_inline void *kpm_memset(void *dst, int c, unsigned long n)
@@ -122,43 +122,43 @@ struct heo_task_inspect_info {
 };
 
 /* Superpower 1: Chain Read */
-struct heo_chain_req {
+struct __attribute__((packed)) heo_chain_req {
     uint64_t base_ptr;
     uint32_t num_hops;
     uint32_t read_len;
-    uint32_t offsets[8];
+    uint64_t offsets[8];
 };
 
-struct heo_chain_resp {
+struct __attribute__((packed)) heo_chain_resp {
     uint64_t final_ptr;
     uint32_t bytes_read;
     uint8_t  data[1024];
 };
 
 /* Superpower 2: Kallsyms Leak */
-struct heo_kallsyms_req {
+struct __attribute__((packed)) heo_kallsyms_req {
     char filter[32];
     uint32_t max_entries;
 };
 
-struct heo_sym_entry {
+struct __attribute__((packed)) heo_sym_entry {
     char name[48];
     uint64_t addr;
 };
 
-struct heo_kallsyms_resp {
+struct __attribute__((packed)) heo_kallsyms_resp {
     uint32_t count;
     struct heo_sym_entry entries[16];
 };
 
 /* Superpower 3: List Walk */
-struct heo_list_walk_req {
+struct __attribute__((packed)) heo_list_walk_req {
     uint64_t head_ptr;
     uint32_t offset_in_struct;
     uint32_t max_count;
 };
 
-struct heo_list_walk_resp {
+struct __attribute__((packed)) heo_list_walk_resp {
     uint32_t count;
     uint64_t entries[32];
 };
@@ -172,7 +172,7 @@ static union {
 } u_resp_buf;
 
 /* Module State */
-static unsigned long authorized_task_ptr = 0;
+static int g_ring0_authorized = 0;
 static uint64_t current_nonce = 0x1337CAFEBEEFULL;
 static struct heo_fork_rule g_fork_rules[MAX_FORK_RULES];
 static int g_comm_offset = -1;
@@ -418,9 +418,9 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
             uint64_t expected_token = ((uint64_t)nonce32) ^ HEO_SECRET_SALT;
 
             if (client_token == expected_token) {
-                authorized_task_ptr = task_now;
+                g_ring0_authorized = 1;
                 args->ret = 0x1337;
-                pr_info("[HEO-KPM] Auth SUCCESS! Task 0x%lx granted Ring 0 Sovereign privilege.\n", task_now);
+                pr_info("[HEO-KPM] Auth SUCCESS! Granted Ring 0 Sovereign privilege to all HEO threads.\n");
             } else {
                 args->ret = (uint64_t)-1;
                 pr_warn("[HEO-KPM] Auth FAILED: token mismatch from Task 0x%lx!\n", task_now);
@@ -429,12 +429,12 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         }
 
         case HEO_CMD_STATUS: {
-            args->ret = (authorized_task_ptr != 0 && authorized_task_ptr == task_now) ? 1 : 0;
+            args->ret = g_ring0_authorized ? 1 : 0;
             break;
         }
 
         case HEO_CMD_FORCE_YAMA_OFF: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 int *p_yama = (int *)kallsyms_lookup_name("ptrace_scope");
                 if (p_yama) {
                     *p_yama = 0;
@@ -448,7 +448,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         }
 
         case HEO_CMD_KERNEL_TELEMETRY: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 void *user_buf = (void *)syscall_argn(args, 2);
                 if (!user_buf) {
                     args->ret = (uint64_t)-1;
@@ -486,7 +486,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         }
 
         case HEO_CMD_SET_FORK_RULE: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 void *user_buf = (void *)syscall_argn(args, 2);
                 if (!user_buf) {
                     args->ret = (uint64_t)-1;
@@ -532,7 +532,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         }
 
         case HEO_CMD_GET_FORK_RULES: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 void *user_buf = (void *)syscall_argn(args, 2);
                 if (!user_buf) {
                     args->ret = (uint64_t)-1;
@@ -551,7 +551,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         }
 
         case HEO_CMD_CLEAR_FORK_RULES: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 kpm_memset(g_fork_rules, 0, sizeof(g_fork_rules));
                 pr_info("[HEO-KPM] All dynamic fork rules cleared from Ring 0 RAM.\n");
                 args->ret = 0;
@@ -566,7 +566,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
          * Grants Root UID 0 + Full Capabilities directly inside kernel without calling 'su'.
          */
         case HEO_CMD_ELEVATE_CREDS: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 if (!p_commit_creds || !p_prepare_kernel_cred) {
                     args->ret = (uint64_t)-38; /* ENOSYS */
                     break;
@@ -589,7 +589,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
          * Ultimate Superpower 2: Zero-Shell Kernel Process Task Inspection
          */
         case HEO_CMD_TASK_INSPECT: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 int target_pid = (int)syscall_argn(args, 2);
                 void *user_buf = (void *)syscall_argn(args, 3);
                 if (!user_buf || !p_find_task_by_vpid || !p_get_task_comm) {
@@ -626,7 +626,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
          * Ultimate Superpower 3: Arbitrary Kernel Memory Peeker (Safe copy_from_kernel_nofault)
          */
         case HEO_CMD_KREAD: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 unsigned long kaddr = (unsigned long)syscall_argn(args, 2);
                 void *user_buf = (void *)syscall_argn(args, 3);
                 unsigned long len = (unsigned long)syscall_argn(args, 4);
@@ -653,7 +653,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
          * Ultimate Superpower 4: Arbitrary Kernel Memory Patcher
          */
         case HEO_CMD_KWRITE: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 unsigned long kaddr = (unsigned long)syscall_argn(args, 2);
                 const void *user_buf = (const void *)syscall_argn(args, 3);
                 unsigned long len = (unsigned long)syscall_argn(args, 4);
@@ -681,24 +681,25 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
          * Ultimate Superpower 5: Dynamic Kernel Symbol Resolver
          */
         case HEO_CMD_RESOLVE_SYMBOL: {
-            if (authorized_task_ptr == task_now) {
-                const void *user_name = (const void *)syscall_argn(args, 2);
-                if (!user_name) {
+            if (g_ring0_authorized) {
+                void *user_buf = (void *)syscall_argn(args, 2);
+                if (!user_buf) {
                     args->ret = 0;
                     break;
                 }
                 char sym_name[64];
                 kpm_memset(sym_name, 0, sizeof(sym_name));
-                if (safe_copy_from_user(sym_name, user_name, 63) == 0) {
+                if (safe_copy_from_user(sym_name, user_buf, 63) == 0) {
                     sym_name[63] = '\0';
                     unsigned long addr = (unsigned long)kallsyms_lookup_name(sym_name);
-                    args->ret = addr;
+                    safe_copy_to_user(user_buf, &addr, sizeof(addr));
+                    args->ret = addr ? 0 : (uint64_t)-1;
                     pr_info("[HEO-KPM] Resolved symbol '%s' -> 0x%lx\n", sym_name, addr);
                 } else {
-                    args->ret = 0;
+                    args->ret = (uint64_t)-14;
                 }
             } else {
-                args->ret = 0;
+                args->ret = (uint64_t)-1;
             }
             break;
         }
@@ -707,7 +708,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
          * Ultimate Superpower 6: Hardware CPU Affinity Steering
          */
         case HEO_CMD_SET_TASK_AFFINITY: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 int target_pid = (int)syscall_argn(args, 2);
                 unsigned long mask_val = (unsigned long)syscall_argn(args, 3);
                 if (!p_find_task_by_vpid || !p_set_cpus_allowed_ptr) {
@@ -734,7 +735,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
         /* ═══ SUPERPOWER 0x10: Multi-hop Pointer Chasing ═══ */
         case HEO_CMD_KREAD_CHAIN: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 void *user_req = (void *)syscall_argn(args, 2);
                 void *user_resp = (void *)syscall_argn(args, 3);
                 if (!user_req || !user_resp) {
@@ -782,7 +783,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
         /* ═══ SUPERPOWER 0x11: Uncensored Kallsyms Leak ═══ */
         case HEO_CMD_KALLSYMS_LEAK: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 void *user_filter = (void *)syscall_argn(args, 2);
                 void *user_resp = (void *)syscall_argn(args, 3);
                 if (!user_filter || !user_resp) {
@@ -794,12 +795,53 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 req.filter[31] = '\0';
                 kpm_memset(&u_resp_buf.kallsyms, 0, sizeof(u_resp_buf.kallsyms));
 
-                unsigned long addr = (unsigned long)kallsyms_lookup_name(req.filter);
-                if (addr) {
-                    u_resp_buf.kallsyms.count = 1;
-                    kpm_memcpy(u_resp_buf.kallsyms.entries[0].name, req.filter, 32);
-                    u_resp_buf.kallsyms.entries[0].addr = addr;
+                uint32_t found = 0;
+                unsigned long direct_addr = (unsigned long)kallsyms_lookup_name(req.filter);
+                if (direct_addr) {
+                    for (int ci = 0; ci < 47 && req.filter[ci]; ci++) {
+                        u_resp_buf.kallsyms.entries[found].name[ci] = req.filter[ci];
+                        u_resp_buf.kallsyms.entries[found].name[ci + 1] = '\0';
+                    }
+                    u_resp_buf.kallsyms.entries[found].addr = direct_addr;
+                    found++;
                 }
+
+                static const char *const k_known_syms[] = {
+                    "init_task",
+                    "commit_creds",
+                    "prepare_kernel_cred",
+                    "find_task_by_vpid",
+                    "set_cpus_allowed_ptr",
+                    "sys_call_table",
+                    "swapper_pg_dir",
+                    "jiffies",
+                    "do_exit",
+                    "kallsyms_lookup_name"
+                };
+
+                for (size_t s = 0; s < sizeof(k_known_syms)/sizeof(k_known_syms[0]) && found < 16; s++) {
+                    const char *target = k_known_syms[s];
+                    if (str_contains(target, req.filter)) {
+                        int already = 0;
+                        for (uint32_t a = 0; a < found; a++) {
+                            if (kpm_strcmp(u_resp_buf.kallsyms.entries[a].name, target) == 0) {
+                                already = 1; break;
+                            }
+                        }
+                        if (!already) {
+                            unsigned long a_addr = (unsigned long)kallsyms_lookup_name(target);
+                            if (a_addr) {
+                                for (int ci = 0; ci < 47 && target[ci]; ci++) {
+                                    u_resp_buf.kallsyms.entries[found].name[ci] = target[ci];
+                                    u_resp_buf.kallsyms.entries[found].name[ci + 1] = '\0';
+                                }
+                                u_resp_buf.kallsyms.entries[found].addr = a_addr;
+                                found++;
+                            }
+                        }
+                    }
+                }
+                u_resp_buf.kallsyms.count = found;
                 args->ret = (safe_copy_to_user(user_resp, &u_resp_buf.kallsyms, sizeof(u_resp_buf.kallsyms)) == 0) ? 0 : (uint64_t)-14;
             } else {
                 args->ret = (uint64_t)-1;
@@ -809,7 +851,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
         /* ═══ SUPERPOWER 0x12: Safe list_head Traversal ═══ */
         case HEO_CMD_LIST_WALK: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 void *user_req = (void *)syscall_argn(args, 2);
                 void *user_resp = (void *)syscall_argn(args, 3);
                 if (!user_req || !user_resp) {
@@ -844,16 +886,20 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
         /* ═══ SUPERPOWER 0x13: ARM64 Virtual to Physical Address (V2P) ═══ */
         case HEO_CMD_V2P: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 uint64_t vaddr = (uint64_t)syscall_argn(args, 2);
+                void *user_buf = (void *)syscall_argn(args, 3);
                 uint64_t par_val = 0;
                 /* Execute AT S1E1R instruction safely */
                 asm volatile("at s1e1r, %1\n\tmrs %0, par_el1" : "=r"(par_val) : "r"(vaddr) : "memory");
-                if (par_val & 1ULL) {
-                    args->ret = 0; /* Translation fault */
-                } else {
-                    args->ret = (par_val & 0x0000FFFFFFFFF000ULL) | (vaddr & 0xFFFULL);
+                uint64_t paddr = 0;
+                if ((par_val & 1ULL) == 0) {
+                    paddr = (par_val & 0x0000FFFFFFFFF000ULL) | (vaddr & 0xFFFULL);
                 }
+                if (user_buf) {
+                    safe_copy_to_user(user_buf, &paddr, sizeof(paddr));
+                }
+                args->ret = paddr ? 0 : (uint64_t)-14;
             } else {
                 args->ret = (uint64_t)-1;
             }
@@ -862,7 +908,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
         /* ═══ SUPERPOWER 0x14: Physical RAM Reader via ioremap ═══ */
         case HEO_CMD_PREAD: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 unsigned long paddr = (unsigned long)syscall_argn(args, 2);
                 void *user_buf = (void *)syscall_argn(args, 3);
                 unsigned long len = (unsigned long)syscall_argn(args, 4);
@@ -887,11 +933,13 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
         /* ═══ SUPERPOWER 0x15: Dynamic Struct Offset Reader ═══ */
         case HEO_CMD_STRUCT_READ: {
-            if (authorized_task_ptr == task_now) {
+            if (g_ring0_authorized) {
                 uint64_t struct_base = (uint64_t)syscall_argn(args, 2);
-                uint32_t offset = (uint32_t)syscall_argn(args, 3);
+                uint64_t packed_arg3 = (uint64_t)syscall_argn(args, 3);
+                uint32_t offset = (uint32_t)(packed_arg3 & 0xFFFFFFFFU);
+                uint32_t len = (uint32_t)((packed_arg3 >> 32) & 0xFFFFFFFFU);
                 void *user_buf = (void *)syscall_argn(args, 4);
-                uint32_t len = (uint32_t)syscall_argn(args, 5);
+
                 if (!user_buf || len == 0 || len > sizeof(u_resp_buf.raw)) {
                     args->ret = (uint64_t)-22;
                     break;
@@ -1028,7 +1076,7 @@ static long heo_companion_exit(void *reserved) {
     if (p_sched_wakeup_gran && orig_sched_wakeup_gran) *p_sched_wakeup_gran = orig_sched_wakeup_gran;
     if (p_sched_migration_cost && orig_sched_migration_cost) *p_sched_migration_cost = orig_sched_migration_cost;
 
-    authorized_task_ptr = 0;
+    g_ring0_authorized = 0;
     pr_info("[HEO-KPM] Clean exit completed.\n");
     return 0;
 }
