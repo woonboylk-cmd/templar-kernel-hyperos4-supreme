@@ -26,12 +26,11 @@ jobs:
       - name: Setup Multi-KPM Workspace
         run: |
           mkdir -p KernelPatch/kpms/arsenal
-          cp kpms_src/heo_ring0_companion_v5.c KernelPatch/kpms/arsenal/heo-ring0-companion-v5.c
-          cp kpms_src/heo_ring0_companion_v5.c KernelPatch/kpms/arsenal/heo-ring0-companion.c
+          cp kpms_src/heo_ring0_companion.c KernelPatch/kpms/arsenal/heo-ring0-companion.c
+          cp kpms_src/11.c KernelPatch/kpms/arsenal/pixel11-spoofer.c
+          cp kpms_src/pixel11_spoofer_min.c KernelPatch/kpms/arsenal/pixel11-spoofer-min.c
           cp kpms_src/heo_scheduler_titan.c KernelPatch/kpms/arsenal/heo-scheduler-titan.c
           cp kpms_src/pseudo_mglru_supreme.c KernelPatch/kpms/arsenal/pseudo-mglru-supreme.c
-          cp kpms_src/pixel11_camera_safe_spoofer.c KernelPatch/kpms/arsenal/pixel11-camera-safe-spoofer.c
-          cp kpms_src/pixel11_spoofer_min.c KernelPatch/kpms/arsenal/pixel11-spoofer-min.c
           cp kpms_src/susfs_stealth_root.c KernelPatch/kpms/arsenal/susfs-stealth-root.c
 
           cat << 'EOF' > KernelPatch/kpms/arsenal/Makefile
@@ -43,12 +42,11 @@ jobs:
 
           CFLAGS := -O2 -fno-pic -fno-pie -fno-common -mcmodel=small -fno-stack-protector -mgeneral-regs-only -ffreestanding -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-builtin
 
-          KPMS := heo-ring0-companion-v5.kpm \
-                  heo-ring0-companion.kpm \
+          KPMS := heo-ring0-companion.kpm \
+                  pixel11-spoofer.kpm \
+                  pixel11-spoofer-min.kpm \
                   heo-scheduler-titan.kpm \
                   pseudo-mglru-supreme.kpm \
-                  pixel11-camera-safe-spoofer.kpm \
-                  pixel11-spoofer-min.kpm \
                   susfs-stealth-root.kpm
 
           all: $(KPMS)

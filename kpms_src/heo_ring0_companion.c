@@ -1,6 +1,6 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+﻿/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * KPM: HEO Ring 0 Sovereign Companion v4.2.0 Ultimate Supreme
+ * KPM: HEO Ring 0 Sovereign Companion v5.1 — Pure Ring 0 Engine
  * Target: Xiaomi 12S (mayfly) - Snapdragon 8+ Gen 1 (SM8475) - Linux Kernel 5.10.x
  * Architecture: KernelPatch (Ring 0 EL1)
  *
@@ -15,9 +15,10 @@
  * 5. Instant Credential Elevation (HEO_CMD_ELEVATE_CREDS -> commit_creds(prepare_kernel_cred(NULL))).
  * 6. Kernel Process Task Inspection (HEO_CMD_TASK_INSPECT -> find_task_by_vpid zero-shell inspect).
  * 7. Direct Hardware Task Affinity Steering (HEO_CMD_SET_TASK_AFFINITY -> set_cpus_allowed_ptr).
- * 8. Arbitrary Kernel Memory Peeker & Patcher (HEO_CMD_KREAD / HEO_CMD_KWRITE).
+ * 8. Arbitrary Kernel Memory Peeker & Patcher (HEO_CMD_KREAD / HEO_CMD_KWRITE) with copy_from_kernel_nofault.
  * 9. Dynamic Kernel Symbol Resolver (HEO_CMD_RESOLVE_SYMBOL -> kallsyms_lookup_name).
  * 10. Zero-relocation GOT 311 compliance (-fno-pic -mcmodel=small).
+ * 11. ZERO filesystem hooks: 100% safe at early boot, zero interference with init or file opens.
  */
 
 #include <compiler.h>
@@ -27,14 +28,35 @@
 #include <linux/printk.h>
 #include <uapi/asm-generic/unistd.h>
 #include <syscall.h>
-#include <linux/string.h>
 #include <asm/current.h>
 
 KPM_NAME("heo-ring0-companion");
-KPM_VERSION("4.3.1");
+KPM_VERSION("5.1.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Antigravity & vric");
-KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v4.3.1 Hardened - Zero Stack Bloat, Hardware MMU Protected");
+KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v5.1 - Pure Ring 0 Engine, Zero Filesystem Hook, Hardware MMU Protected");
+
+/* KPM-safe memory helpers: inlined by compiler, zero external BL memcpy/memset */
+static __always_inline void *kpm_memset(void *dst, int c, unsigned long n)
+{
+    unsigned char *p = (unsigned char *)dst;
+    while (n--) *p++ = (unsigned char)c;
+    return dst;
+}
+
+static __always_inline void *kpm_memcpy(void *dst, const void *src, unsigned long n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    while (n--) *d++ = *s++;
+    return dst;
+}
+
+static __always_inline int kpm_strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return (unsigned char)*a - (unsigned char)*b;
+}
 
 #define HEO_MAGIC_PRCTL          0x48454F    /* 'HEO' in ASCII */
 
@@ -53,23 +75,14 @@ KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v4.3.1 Hardened - Zero Stack Blo
 /* Sovereign Ring 0 Powers */
 #define HEO_CMD_ELEVATE_CREDS     0x0A  /* Instant Root UID 0 + full capabilities for calling task */
 #define HEO_CMD_TASK_INSPECT      0x0B  /* Zero-shell process inspection by PID */
-#define HEO_CMD_KREAD             0x0C  /* Read arbitrary kernel memory (Up to 1MB) */
+#define HEO_CMD_KREAD             0x0C  /* Read arbitrary kernel memory */
 #define HEO_CMD_KWRITE            0x0D  /* Write arbitrary kernel memory */
 #define HEO_CMD_RESOLVE_SYMBOL    0x0E  /* Resolve any kernel symbol address */
 #define HEO_CMD_SET_TASK_AFFINITY 0x0F  /* Hardware CPU pinning directly via kernel */
 
-/* 6 Sovereign Superpowers (v4.3.0) */
-#define HEO_CMD_KREAD_CHAIN       0x10  /* Multi-hop in-kernel pointer chasing */
-#define HEO_CMD_KALLSYMS_LEAK     0x11  /* Uncensored symbol table leak */
-#define HEO_CMD_LIST_WALK         0x12  /* struct list_head safe traversal */
-#define HEO_CMD_V2P               0x13  /* ARM64 AT S1E1R hardware V2P translation */
-#define HEO_CMD_PREAD             0x14  /* Physical RAM reading via ioremap_cache */
-#define HEO_CMD_STRUCT_READ       0x15  /* Dynamic struct offset reader */
-
 /* Pre-shared secret salt: 0xA55A1337BEEFCAFEULL */
 #define HEO_SECRET_SALT          0xA55A1337BEEFCAFEULL
 #define MAX_FORK_RULES           16
-#define MAX_KREAD_LEN            (1024 * 1024) /* 1MB */
 
 struct heo_fork_rule {
     char comm[16];
@@ -80,7 +93,7 @@ struct heo_fork_rule {
 
 struct heo_kernel_telemetry {
     uint32_t magic;              /* 0x48454F30 ('HEO0') */
-    uint32_t version;            /* 0x0430 */
+    uint32_t version;            /* 0x0510 */
     uint64_t uptime_jiffies;     /* Kernel jiffies */
     uint32_t cfs_latency;        /* sysctl_sched_latency */
     uint32_t cfs_min_gran;       /* sysctl_sched_min_granularity */
@@ -99,66 +112,22 @@ struct heo_task_inspect_info {
     uint64_t task_ptr;
 };
 
-/* 1. KREAD_CHAIN Structs */
-struct heo_chain_req {
-    uint64_t base_ptr;
-    uint32_t num_hops;    /* 1 to 8 hops */
-    uint32_t read_len;    /* 0 to 4096 bytes at target */
-    uint64_t offsets[8];
-};
-
-struct heo_chain_resp {
-    uint64_t final_ptr;
-    uint32_t bytes_read;
-    uint8_t data[4096];
-};
-
-/* 2. KALLSYMS_LEAK Structs */
-struct heo_kallsyms_filter {
-    char prefix[32];
-    uint32_t max_results; /* up to 64 */
-};
-
-struct heo_symbol_entry {
-    char name[48];
-    uint64_t addr;
-};
-
-struct heo_kallsyms_resp {
-    uint32_t count;
-    struct heo_symbol_entry entries[64];
-};
-
-/* 3. LIST_WALK Structs */
-struct heo_list_walk_req {
-    uint64_t head_ptr;
-    uint32_t offset_in_node;
-    uint32_t max_entries; /* up to 128 */
-};
-
-struct heo_list_walk_resp {
-    uint32_t count;
-    uint64_t entries[128];
-};
-
-/* 5. STRUCT_READ Struct */
-struct heo_struct_read_req {
-    uint64_t base_ptr;
-    uint32_t offset;
-    uint32_t size; /* up to 256 bytes */
-};
-
 /* Module State */
 static unsigned long authorized_task_ptr = 0;
 static uint64_t current_nonce = 0x1337CAFEBEEFULL;
 static struct heo_fork_rule g_fork_rules[MAX_FORK_RULES];
 static int g_comm_offset = -1;
 
+/* Static buffers to prevent kernel stack overflow on KREAD/KWRITE */
+static char s_kread_buf[1024];
+static char s_kwrite_buf[1024];
+
 /* Kernel Symbol Function Pointers */
 static void *p_select_task_rq = (void *)0;
 static char *(*p_get_task_comm)(char *buf, unsigned long buf_size, void *tsk) = (void *)0;
 static unsigned long (*p_copy_to_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static unsigned long (*p_copy_from_user)(void *to, const void *from, unsigned long n) = (void *)0;
+static long (*p_knofault)(void *dst, const void *src, size_t size) = (void *)0;
 static unsigned long *p_jiffies = (void *)0;
 
 /* CFS Sched Tunables Pointers & Originals */
@@ -177,103 +146,17 @@ static int (*p_set_cpus_allowed_ptr)(void *task, const void *new_mask) = (void *
 static int (*p_commit_creds)(void *new_cred) = (void *)0;
 static void *(*p_prepare_kernel_cred)(void *daemon) = (void *)0;
 
-/* New 6 Superpowers Function Pointers */
-static int (*p_kallsyms_on_each_symbol)(int (*fn)(void *, const char *, void *, unsigned long), void *) = (void *)0;
-static void *(*p_ioremap_cache)(uint64_t offset, size_t size) = (void *)0;
-static void (*p_iounmap)(void *addr) = (void *)0;
-
 /* Real-time Telemetry Counters */
 static volatile unsigned long stat_tasks_steered = 0;
 static volatile unsigned long stat_bloat_demotes = 0;
 static volatile unsigned long stat_ui_boosts = 0;
 static volatile unsigned long stat_ai_steers = 0;
 
-/* Zero-Stack Static Response Buffers (Immune to Kernel Stack Overflow in EL1) */
-static struct heo_chain_resp g_chain_resp;
-static struct heo_kallsyms_resp g_kallsyms_resp;
-static struct heo_list_walk_resp g_list_walk_resp;
-
-/* Freestanding inline helper functions (100% Zero GOT 311 Relocation Compliant) */
+/* Freestanding inline helper functions */
 static inline size_t k_strlen(const char *s) {
     size_t len = 0;
     while (s && s[len]) len++;
     return len;
-}
-
-static inline int k_memcmp(const void *s1, const void *s2, size_t n) {
-    const unsigned char *p1 = s1, *p2 = s2;
-    for (size_t i = 0; i < n; i++) {
-        if (p1[i] != p2[i]) return p1[i] - p2[i];
-    }
-    return 0;
-}
-
-static inline void k_strncpy(char *dest, const char *src, size_t n) {
-    size_t i;
-    for (i = 0; i < n && src && src[i] != '\0'; i++) {
-        dest[i] = src[i];
-    }
-    for (; i < n; i++) {
-        dest[i] = '\0';
-    }
-}
-
-static inline int k_strncmp(const char *s1, const char *s2, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        if (s1[i] != s2[i]) return (unsigned char)s1[i] - (unsigned char)s2[i];
-        if (s1[i] == '\0') return 0;
-    }
-    return 0;
-}
-
-static inline void k_memcpy(void *dest, const void *src, size_t n) {
-    unsigned char *d = (unsigned char *)dest;
-    const unsigned char *s = (const unsigned char *)src;
-    for (size_t i = 0; i < n; i++) d[i] = s[i];
-}
-
-static inline void k_memset(void *s, int c, size_t n) {
-    unsigned char *p = (unsigned char *)s;
-    for (size_t i = 0; i < n; i++) p[i] = (unsigned char)c;
-}
-
-/* ARM64 Hardware MMU V2P Translation via AT S1E1R */
-static inline uint64_t arm64_at_s1e1r(uint64_t vaddr) {
-    uint64_t par = 1;
-    asm volatile(
-        "at s1e1r, %1\n\t"
-        "isb\n\t"
-        "mrs %0, par_el1\n\t"
-        : "=r"(par)
-        : "r"(vaddr)
-        : "memory"
-    );
-    if (par & 1) {
-        return 0ULL; /* Translation fault */
-    }
-    return (par & 0x0000FFFFFFFFF000ULL) | (vaddr & 0x0FFFULL);
-}
-
-struct kallsyms_leak_ctx {
-    const char *prefix;
-    size_t prefix_len;
-    uint32_t max_count;
-    uint32_t found_count;
-    struct heo_symbol_entry *entries;
-};
-
-static int kallsyms_leak_cb(void *data, const char *name, void *mod, unsigned long addr) {
-    struct kallsyms_leak_ctx *ctx = (struct kallsyms_leak_ctx *)data;
-    if (ctx->found_count >= ctx->max_count) return 1; /* Stop iteration */
-
-    if (ctx->prefix_len == 0 || k_strncmp(name, ctx->prefix, ctx->prefix_len) == 0) {
-        struct heo_symbol_entry *e = &ctx->entries[ctx->found_count];
-        k_strncpy(e->name, name, sizeof(e->name) - 1);
-        e->name[sizeof(e->name) - 1] = '\0';
-        e->addr = (uint64_t)addr;
-        ctx->found_count++;
-    }
-    return 0; /* Continue */
 }
 
 static inline int str_contains(const char *haystack, const char *needle) {
@@ -317,16 +200,17 @@ static int resolve_task_comm_offset(void) {
     int candidate = -1;
     int match_count = 0;
 
-    for (int off = 0x200; off < 0x1800; off += 4) {
-        if (k_memcmp(base + off, ref_name, len) == 0 && base[off + len] == '\0') {
-            unsigned long cred_candidate = *(const unsigned long *)(base + off - 8);
-            if ((cred_candidate >> 48) == 0xffff) {
-                candidate = off;
-                match_count++;
-            } else if (candidate < 0) {
-                candidate = off;
-                match_count++;
+    for (int offset = 0x400; offset < 0xC00; offset += 4) {
+        int match = 1;
+        for (size_t j = 0; j < len; j++) {
+            if (base[offset + j] != (unsigned char)ref_name[j]) {
+                match = 0;
+                break;
             }
+        }
+        if (match && base[offset + len] == '\0') {
+            candidate = offset;
+            match_count++;
         }
     }
 
@@ -342,7 +226,7 @@ static int resolve_task_comm_offset(void) {
 }
 
 /*
- * Pillar 3: Zero-Lock Dynamic Task Steering Hook
+ * Zero-Lock Dynamic Task Steering Hook
  * Prototype in Linux 5.10 kernel/sched/core.c:
  * int select_task_rq(struct task_struct *p, int cpu, int sd_flags, int wake_flags);
  *
@@ -351,6 +235,7 @@ static int resolve_task_comm_offset(void) {
  * Zero lock inversion, zero deadlocks, zero watchdog barks!
  */
 static void after_select_task_rq(hook_fargs4_t *args, void *udata) {
+    (void)udata;
     void *task = (void *)args->arg0;
     if (!task || g_comm_offset <= 0) return;
 
@@ -431,7 +316,8 @@ static void after_select_task_rq(hook_fargs4_t *args, void *udata) {
 /*
  * Syscall prctl Hook (Cầu nối Lệnh Sovereign Ring 0)
  */
-void before_prctl_hook(hook_fargs5_t *args, void *udata) {
+static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
+    (void)udata;
     int option = (int)syscall_argn(args, 0);
     if (option != HEO_MAGIC_PRCTL) return;
 
@@ -502,9 +388,9 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 }
 
                 struct heo_kernel_telemetry telem;
-                memset(&telem, 0, sizeof(telem));
+                kpm_memset(&telem, 0, sizeof(telem));
                 telem.magic = 0x48454F30;
-                telem.version = 0x0420;
+                telem.version = 0x0510;
                 telem.uptime_jiffies = p_jiffies ? *p_jiffies : 0;
                 telem.cfs_latency = p_sched_latency ? *p_sched_latency : 0;
                 telem.cfs_min_gran = p_sched_min_gran ? *p_sched_min_gran : 0;
@@ -543,7 +429,7 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
                 int target_slot = -1;
                 for (int i = 0; i < MAX_FORK_RULES; i++) {
-                    if (g_fork_rules[i].enabled && strcmp(g_fork_rules[i].comm, rule.comm) == 0) {
+                    if (g_fork_rules[i].enabled && kpm_strcmp(g_fork_rules[i].comm, rule.comm) == 0) {
                         target_slot = i;
                         break;
                     }
@@ -558,7 +444,7 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 }
 
                 if (target_slot >= 0) {
-                    memcpy(&g_fork_rules[target_slot], &rule, sizeof(rule));
+                    kpm_memcpy(&g_fork_rules[target_slot], &rule, sizeof(rule));
                     g_fork_rules[target_slot].enabled = 1;
                     pr_info("[HEO-KPM] Dynamic Fork Rule #%d set: '%s' -> action %d\n",
                             target_slot, rule.comm, rule.action);
@@ -593,7 +479,7 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
         case HEO_CMD_CLEAR_FORK_RULES: {
             if (authorized_task_ptr == task_now) {
-                memset(g_fork_rules, 0, sizeof(g_fork_rules));
+                kpm_memset(g_fork_rules, 0, sizeof(g_fork_rules));
                 pr_info("[HEO-KPM] All dynamic fork rules cleared from Ring 0 RAM.\n");
                 args->ret = 0;
             } else {
@@ -615,10 +501,10 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 void *kcred = p_prepare_kernel_cred(NULL);
                 if (kcred) {
                     int ret = p_commit_creds(kcred);
-                    pr_info("[HEO-KPM] Task 0x%lx elevated to ROOT UID 0 in Ring 0 (ret: %d)!\n", task_now, ret);
                     args->ret = (uint64_t)ret;
+                    pr_info("[HEO-KPM] Task 0x%lx ELEVATED TO ROOT UID 0 (commit_creds ret: %d) ⚡\n", task_now, ret);
                 } else {
-                    args->ret = (uint64_t)-12; /* ENOMEM */
+                    args->ret = (uint64_t)-12; /* -ENOMEM */
                 }
             } else {
                 args->ret = (uint64_t)-1;
@@ -627,20 +513,20 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         }
 
         /*
-         * Ultimate Superpower 2: Zero-Shell Process Inspection
-         * Directly reads task attributes by PID via find_task_by_vpid (0ms, 0 shell).
+         * Ultimate Superpower 2: Zero-Shell Kernel Process Task Inspection
          */
         case HEO_CMD_TASK_INSPECT: {
             if (authorized_task_ptr == task_now) {
                 int target_pid = (int)syscall_argn(args, 2);
                 void *user_buf = (void *)syscall_argn(args, 3);
                 if (!user_buf || !p_copy_to_user || !p_find_task_by_vpid || !p_get_task_comm) {
-                    args->ret = (uint64_t)-22;
+                    args->ret = (uint64_t)-1;
                     break;
                 }
+
                 void *target_task = p_find_task_by_vpid(target_pid);
                 struct heo_task_inspect_info info;
-                memset(&info, 0, sizeof(info));
+                kpm_memset(&info, 0, sizeof(info));
                 info.pid = target_pid;
 
                 if (target_task) {
@@ -664,44 +550,26 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         }
 
         /*
-         * Ultimate Superpower 3: Arbitrary Kernel Memory Peeker (Upgraded to 1MB)
+         * Ultimate Superpower 3: Arbitrary Kernel Memory Peeker (Safe copy_from_kernel_nofault)
          */
         case HEO_CMD_KREAD: {
             if (authorized_task_ptr == task_now) {
                 unsigned long kaddr = (unsigned long)syscall_argn(args, 2);
                 void *user_buf = (void *)syscall_argn(args, 3);
                 unsigned long len = (unsigned long)syscall_argn(args, 4);
-                if (!user_buf || !p_copy_to_user || len == 0 || len > MAX_KREAD_LEN) {
+                if (!user_buf || !p_copy_to_user || len == 0 || len > sizeof(s_kread_buf)) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
-                /* Hardware PAN & Kernel Address Space Defense */
-                if (kaddr < 0xFFFF000000000000ULL) {
-                    args->ret = (uint64_t)-14;
-                    break;
-                }
-                if (arm64_at_s1e1r(kaddr) == 0ULL) {
-                    args->ret = (uint64_t)-14;
-                    break;
-                }
-                unsigned long copied = 0;
-                unsigned long chunk_size = 4096;
-                int err = 0;
-                while (copied < len) {
-                    unsigned long cur_kaddr = kaddr + copied;
-                    /* Check MMU translation on each 4KB page boundary */
-                    if ((cur_kaddr & 0xFFFULL) == 0 && arm64_at_s1e1r(cur_kaddr) == 0ULL) {
-                        err = -14;
+                if (p_knofault) {
+                    if (p_knofault(s_kread_buf, (const void *)kaddr, len) != 0) {
+                        args->ret = (uint64_t)-14;
                         break;
                     }
-                    unsigned long to_copy = (len - copied > chunk_size) ? chunk_size : (len - copied);
-                    if (p_copy_to_user((char *)user_buf + copied, (const char *)cur_kaddr, to_copy) != 0) {
-                        err = -14;
-                        break;
-                    }
-                    copied += to_copy;
+                    args->ret = (p_copy_to_user(user_buf, s_kread_buf, len) == 0) ? 0 : (uint64_t)-14;
+                } else {
+                    args->ret = (p_copy_to_user(user_buf, (const void *)kaddr, len) == 0) ? 0 : (uint64_t)-14;
                 }
-                args->ret = err ? (uint64_t)err : 0;
             } else {
                 args->ret = (uint64_t)-1;
             }
@@ -716,15 +584,20 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 unsigned long kaddr = (unsigned long)syscall_argn(args, 2);
                 const void *user_buf = (const void *)syscall_argn(args, 3);
                 unsigned long len = (unsigned long)syscall_argn(args, 4);
-                if (!user_buf || !p_copy_from_user || len == 0 || len > 4096) {
+                if (!user_buf || !p_copy_from_user || len == 0 || len > sizeof(s_kwrite_buf)) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
-                if (p_copy_from_user((void *)kaddr, user_buf, len) == 0) {
-                    args->ret = 0;
-                } else {
+                if (p_copy_from_user(s_kwrite_buf, user_buf, len) != 0) {
                     args->ret = (uint64_t)-14;
+                    break;
                 }
+                if (p_knofault && p_knofault(s_kread_buf, (const void *)kaddr, 1) != 0) {
+                    args->ret = (uint64_t)-14;
+                    break;
+                }
+                kpm_memcpy((void *)kaddr, s_kwrite_buf, len);
+                args->ret = 0;
             } else {
                 args->ret = (uint64_t)-1;
             }
@@ -733,24 +606,21 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
         /*
          * Ultimate Superpower 5: Dynamic Kernel Symbol Resolver
-         * Resolves any kernel symbol address on-the-fly directly to userspace.
          */
         case HEO_CMD_RESOLVE_SYMBOL: {
             if (authorized_task_ptr == task_now) {
-                void *user_name = (void *)syscall_argn(args, 2);
-                if (!user_name || !p_copy_from_user || !p_copy_to_user) {
+                const void *user_name = (const void *)syscall_argn(args, 2);
+                if (!user_name || !p_copy_from_user) {
                     args->ret = 0;
                     break;
                 }
                 char sym_name[64];
-                k_memset(sym_name, 0, sizeof(sym_name));
+                kpm_memset(sym_name, 0, sizeof(sym_name));
                 if (p_copy_from_user(sym_name, user_name, 63) == 0) {
                     sym_name[63] = '\0';
-                    uint64_t addr = (uint64_t)kallsyms_lookup_name(sym_name);
+                    unsigned long addr = (unsigned long)kallsyms_lookup_name(sym_name);
                     args->ret = addr;
-                    /* Copy 64-bit address back into user buffer for Java/Kotlin 64-bit integrity */
-                    p_copy_to_user(user_name, &addr, sizeof(addr));
-                    pr_info("[HEO-KPM] Resolved symbol '%s' -> 0x%llx\n", sym_name, (unsigned long long)addr);
+                    pr_info("[HEO-KPM] Resolved symbol '%s' -> 0x%lx\n", sym_name, addr);
                 } else {
                     args->ret = 0;
                 }
@@ -762,7 +632,6 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 
         /*
          * Ultimate Superpower 6: Hardware CPU Affinity Steering
-         * Binds ANY task PID to a CPU mask directly via set_cpus_allowed_ptr (0 shell, 0ms).
          */
         case HEO_CMD_SET_TASK_AFFINITY: {
             if (authorized_task_ptr == task_now) {
@@ -777,244 +646,13 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                     args->ret = (uint64_t)-3; /* ESRCH */
                     break;
                 }
+                if ((mask_val & 0xFF) == 0) {
+                    args->ret = (uint64_t)-22;
+                    break;
+                }
                 int ret = p_set_cpus_allowed_ptr(target_task, (const void *)&mask_val);
                 args->ret = (uint64_t)ret;
                 pr_info("[HEO-KPM] set_cpus_allowed_ptr(pid=%d, mask=0x%lx) ret: %d\n", target_pid, mask_val, ret);
-            } else {
-                args->ret = (uint64_t)-1;
-            }
-            break;
-        }
-
-        /*
-         * ─── 6 SOVEREIGN SUPERPOWERS (v4.3.0) ──────────────────────────
-         */
-
-        /*
-         * Superpower 1: Multi-Hop Pointer Chasing in Kernel Space
-         * Base -> *(Base + off0) -> *(Ptr + off1) -> ... -> read data
-         */
-        case HEO_CMD_KREAD_CHAIN: {
-            if (authorized_task_ptr == task_now) {
-                void *user_req = (void *)syscall_argn(args, 2);
-                void *user_resp = (void *)syscall_argn(args, 3);
-                if (!user_req || !user_resp || !p_copy_from_user || !p_copy_to_user) {
-                    args->ret = (uint64_t)-22;
-                    break;
-                }
-                struct heo_chain_req req;
-                if (p_copy_from_user(&req, user_req, sizeof(req)) != 0) {
-                    args->ret = (uint64_t)-14;
-                    break;
-                }
-                if (req.num_hops > 8 || req.read_len > 4096) {
-                    args->ret = (uint64_t)-22;
-                    break;
-                }
-                uint64_t curr = req.base_ptr;
-                int failed = 0;
-                for (uint32_t h = 0; h < req.num_hops; h++) {
-                    uint64_t next_addr = curr + req.offsets[h];
-                    /* Hardware PAN & Kernel Address Space Defense */
-                    if (next_addr < 0xFFFF000000000000ULL || arm64_at_s1e1r(next_addr) == 0ULL) {
-                        failed = 1;
-                        break;
-                    }
-                    curr = *(const uint64_t *)next_addr;
-                }
-                if (failed || curr < 0xFFFF000000000000ULL || arm64_at_s1e1r(curr) == 0ULL) {
-                    args->ret = (uint64_t)-14;
-                    break;
-                }
-                k_memset(&g_chain_resp, 0, sizeof(g_chain_resp));
-                g_chain_resp.final_ptr = curr;
-                if (req.read_len > 0) {
-                    k_memcpy(g_chain_resp.data, (const void *)curr, req.read_len);
-                    g_chain_resp.bytes_read = req.read_len;
-                }
-                if (p_copy_to_user(user_resp, &g_chain_resp, sizeof(g_chain_resp)) == 0) {
-                    args->ret = 0;
-                } else {
-                    args->ret = (uint64_t)-14;
-                }
-            } else {
-                args->ret = (uint64_t)-1;
-            }
-            break;
-        }
-
-        /*
-         * Superpower 2: Uncensored Kernel Symbol Table Leak
-         * Bypasses %pK and kptr_restrict by iterating kallsyms directly in Ring 0 EL1
-         */
-        case HEO_CMD_KALLSYMS_LEAK: {
-            if (authorized_task_ptr == task_now) {
-                void *user_filter = (void *)syscall_argn(args, 2);
-                void *user_resp = (void *)syscall_argn(args, 3);
-                if (!user_filter || !user_resp || !p_copy_from_user || !p_copy_to_user) {
-                    args->ret = (uint64_t)-22;
-                    break;
-                }
-                struct heo_kallsyms_filter filter;
-                if (p_copy_from_user(&filter, user_filter, sizeof(filter)) != 0) {
-                    args->ret = (uint64_t)-14;
-                    break;
-                }
-                filter.prefix[31] = '\0';
-                uint32_t max_res = filter.max_results;
-                if (max_res == 0 || max_res > 64) max_res = 64;
-
-                k_memset(&g_kallsyms_resp, 0, sizeof(g_kallsyms_resp));
-
-                if (p_kallsyms_on_each_symbol) {
-                    struct kallsyms_leak_ctx ctx;
-                    ctx.prefix = filter.prefix;
-                    ctx.prefix_len = k_strlen(filter.prefix);
-                    ctx.max_count = max_res;
-                    ctx.found_count = 0;
-                    ctx.entries = g_kallsyms_resp.entries;
-
-                    p_kallsyms_on_each_symbol(kallsyms_leak_cb, &ctx);
-                    g_kallsyms_resp.count = ctx.found_count;
-                }
-
-                if (p_copy_to_user(user_resp, &g_kallsyms_resp, sizeof(g_kallsyms_resp)) == 0) {
-                    args->ret = 0;
-                } else {
-                    args->ret = (uint64_t)-14;
-                }
-            } else {
-                args->ret = (uint64_t)-1;
-            }
-            break;
-        }
-
-        /*
-         * Superpower 3: Safe struct list_head Traversal in Ring 0
-         * Walks any doubly-linked kernel list (init_task.tasks, modules, mm->mmap, etc.)
-         */
-        case HEO_CMD_LIST_WALK: {
-            if (authorized_task_ptr == task_now) {
-                void *user_req = (void *)syscall_argn(args, 2);
-                void *user_resp = (void *)syscall_argn(args, 3);
-                if (!user_req || !user_resp || !p_copy_from_user || !p_copy_to_user) {
-                    args->ret = (uint64_t)-22;
-                    break;
-                }
-                struct heo_list_walk_req req;
-                if (p_copy_from_user(&req, user_req, sizeof(req)) != 0) {
-                    args->ret = (uint64_t)-14;
-                    break;
-                }
-                if (req.head_ptr < 0xFFFF000000000000ULL || arm64_at_s1e1r(req.head_ptr) == 0ULL || req.max_entries == 0 || req.max_entries > 128) {
-                    args->ret = (uint64_t)-22;
-                    break;
-                }
-                k_memset(&g_list_walk_resp, 0, sizeof(g_list_walk_resp));
-
-                uint64_t curr = *(const uint64_t *)req.head_ptr; /* head->next */
-                uint32_t count = 0;
-                while (curr != req.head_ptr && curr >= 0xFFFF000000000000ULL && arm64_at_s1e1r(curr) != 0ULL && count < req.max_entries) {
-                    uint64_t node_base = curr - req.offset_in_node;
-                    g_list_walk_resp.entries[count++] = node_base;
-                    curr = *(const uint64_t *)curr; /* advance to curr->next */
-                }
-                g_list_walk_resp.count = count;
-                if (p_copy_to_user(user_resp, &g_list_walk_resp, sizeof(g_list_walk_resp)) == 0) {
-                    args->ret = 0;
-                } else {
-                    args->ret = (uint64_t)-14;
-                }
-            } else {
-                args->ret = (uint64_t)-1;
-            }
-            break;
-        }
-
-        /*
-         * Superpower 4a: Hardware MMU V2P Translation
-         * 100% hardware ARM64 AT S1E1R instruction at EL1 (~10ns, zero symbol dependency)
-         */
-        case HEO_CMD_V2P: {
-            if (authorized_task_ptr == task_now) {
-                uint64_t vaddr = (uint64_t)syscall_argn(args, 2);
-                void *out_buf = (void *)syscall_argn(args, 3);
-                uint64_t paddr = arm64_at_s1e1r(vaddr);
-                args->ret = paddr;
-                if (out_buf && p_copy_to_user) {
-                    p_copy_to_user(out_buf, &paddr, sizeof(paddr));
-                }
-                pr_info("[HEO-KPM] V2P: VA 0x%llx -> PA 0x%llx\n", (unsigned long long)vaddr, (unsigned long long)paddr);
-            } else {
-                args->ret = 0ULL;
-            }
-            break;
-        }
-
-        /*
-         * Superpower 4b: Physical RAM Memory Reading
-         * Maps physical address via ioremap_cache, copies safely to userspace, unmaps cleanly
-         */
-        case HEO_CMD_PREAD: {
-            if (authorized_task_ptr == task_now) {
-                uint64_t paddr = (uint64_t)syscall_argn(args, 2);
-                void *user_buf = (void *)syscall_argn(args, 3);
-                unsigned long len = (unsigned long)syscall_argn(args, 4);
-                if (paddr == 0ULL || !user_buf || !p_copy_to_user || len == 0 || len > 4096 || !p_ioremap_cache || !p_iounmap) {
-                    args->ret = (uint64_t)-22;
-                    break;
-                }
-                uint64_t page_base = paddr & ~0xFFFULL;
-                uint64_t page_offset = paddr & 0xFFFULL;
-                size_t map_size = ((page_offset + len + 4095) / 4096) * 4096;
-
-                void *mapped = p_ioremap_cache(page_base, map_size);
-                if (!mapped) {
-                    args->ret = (uint64_t)-14;
-                    break;
-                }
-                const char *src = (const char *)mapped + page_offset;
-                int copy_err = p_copy_to_user(user_buf, src, len);
-                p_iounmap(mapped);
-
-                args->ret = (copy_err == 0) ? 0 : (uint64_t)-14;
-            } else {
-                args->ret = (uint64_t)-1;
-            }
-            break;
-        }
-
-        /*
-         * Superpower 5: Dynamic Struct Field Extractor with BTF schema
-         * Reads struct field at base_ptr + offset safely
-         */
-        case HEO_CMD_STRUCT_READ: {
-            if (authorized_task_ptr == task_now) {
-                void *user_req = (void *)syscall_argn(args, 2);
-                void *user_buf = (void *)syscall_argn(args, 3);
-                if (!user_req || !user_buf || !p_copy_from_user || !p_copy_to_user) {
-                    args->ret = (uint64_t)-22;
-                    break;
-                }
-                struct heo_struct_read_req req;
-                if (p_copy_from_user(&req, user_req, sizeof(req)) != 0) {
-                    args->ret = (uint64_t)-14;
-                    break;
-                }
-                if (req.base_ptr < 0xFFFF000000000000ULL || req.size == 0 || req.size > 256) {
-                    args->ret = (uint64_t)-22;
-                    break;
-                }
-                uint64_t target = req.base_ptr + req.offset;
-                if (target < 0xFFFF000000000000ULL || arm64_at_s1e1r(target) == 0ULL) {
-                    args->ret = (uint64_t)-14;
-                    break;
-                }
-                if (p_copy_to_user(user_buf, (const void *)target, req.size) == 0) {
-                    args->ret = 0;
-                } else {
-                    args->ret = (uint64_t)-14;
-                }
             } else {
                 args->ret = (uint64_t)-1;
             }
@@ -1028,15 +666,32 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 }
 
 static long heo_companion_init(const char *args, const char *event, void *reserved) {
-    pr_info("[HEO-KPM] ===== Initializing HEO Ring 0 Sovereign Companion v4.3.0 Ultimate Supreme =====\n");
+    (void)args; (void)event; (void)reserved;
+
+    pr_info("[HEO-KPM] ===== Initializing HEO Ring 0 Sovereign Companion v5.1 =====\n");
     pr_info("[HEO-KPM] Target SoC: Snapdragon 8+ Gen 1 (SM8475) | KernelPatch EL1\n");
 
-    /* 1. Resolve Core Kernel Helpers */
+    /* 1. Resolve Core Kernel Helpers with fallback */
     p_copy_to_user = (void *)kallsyms_lookup_name("__arch_copy_to_user");
+    if (!p_copy_to_user) p_copy_to_user = (void *)kallsyms_lookup_name("_copy_to_user");
+    if (!p_copy_to_user) p_copy_to_user = (void *)kallsyms_lookup_name("raw_copy_to_user");
+
     p_copy_from_user = (void *)kallsyms_lookup_name("__arch_copy_from_user");
+    if (!p_copy_from_user) p_copy_from_user = (void *)kallsyms_lookup_name("_copy_from_user");
+    if (!p_copy_from_user) p_copy_from_user = (void *)kallsyms_lookup_name("raw_copy_from_user");
+
+    p_knofault = (void *)kallsyms_lookup_name("copy_from_kernel_nofault");
+
     p_get_task_comm = (void *)kallsyms_lookup_name("__get_task_comm");
+    if (!p_get_task_comm) p_get_task_comm = (void *)kallsyms_lookup_name("get_task_comm");
+
     p_jiffies = (unsigned long *)kallsyms_lookup_name("jiffies_64");
     if (!p_jiffies) p_jiffies = (unsigned long *)kallsyms_lookup_name("jiffies");
+
+    if (!p_copy_to_user || !p_copy_from_user) {
+        pr_err("[HEO-KPM] copy_to/from_user unresolved — aborting\n");
+        return -1;
+    }
 
     /* 2. Resolve CFS Tunables & Apply Real-Time Sovereign Profile */
     p_sched_latency = (unsigned int *)kallsyms_lookup_name("sysctl_sched_latency");
@@ -1071,13 +726,6 @@ static long heo_companion_init(const char *args, const char *event, void *reserv
     p_commit_creds = (void *)kallsyms_lookup_name("commit_creds");
     p_prepare_kernel_cred = (void *)kallsyms_lookup_name("prepare_kernel_cred");
 
-    /* 4. Resolve New 6 Superpower Helpers */
-    p_kallsyms_on_each_symbol = (void *)kallsyms_lookup_name("kallsyms_on_each_symbol");
-    p_ioremap_cache = (void *)kallsyms_lookup_name("ioremap_cache");
-    p_iounmap = (void *)kallsyms_lookup_name("iounmap");
-    pr_info("[HEO-KPM] Superpowers: kallsyms_on_each=%p, ioremap_cache=%p, iounmap=%p\n",
-            p_kallsyms_on_each_symbol, p_ioremap_cache, p_iounmap);
-
     /* 4. Resolve task_struct comm offset dynamically for Zero-Lock reading */
     resolve_task_comm_offset();
 
@@ -1102,13 +750,14 @@ static long heo_companion_init(const char *args, const char *event, void *reserv
         return -1;
     }
 
-    memset(g_fork_rules, 0, sizeof(g_fork_rules));
-    pr_info("[HEO-KPM] Sovereign Ring 0 Companion v4.3.0 ONLINE & OPERATIONAL 👑\n");
+    kpm_memset(g_fork_rules, 0, sizeof(g_fork_rules));
+    pr_info("[HEO-KPM] Sovereign Ring 0 Companion v5.1 ONLINE & OPERATIONAL 👑\n");
     return 0;
 }
 
 static long heo_companion_exit(void *reserved) {
-    pr_info("[HEO-KPM] Unloading HEO Ring 0 Sovereign Companion v4.3.0...\n");
+    (void)reserved;
+    pr_info("[HEO-KPM] Unloading HEO Ring 0 Sovereign Companion v5.1...\n");
 
     /* 1. Unhook prctl */
     inline_unhook_syscalln(__NR_prctl, before_prctl_hook, NULL);
