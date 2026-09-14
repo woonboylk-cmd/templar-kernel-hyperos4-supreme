@@ -102,3 +102,26 @@ Authenticated Syscall: `prctl(0x48454F, cmd, arg2, arg3, arg4)`
   - `attach <pid>`: Executes `ptrace(PTRACE_ATTACH)`, extracts `user_pt_regs` via `NT_PRSTATUS`, prints JSON telemetry, and detaches cleanly.
   - `dump <pid> <hex_addr> <len>`: Reads memory directly via `/proc/<pid>/mem`.
 - **Integrity**: Completely replaced legacy `kill -SIGSTOP` placeholder simulation in `PTraceHookEngine.kt`.
+
+---
+
+## 7. Universal Deployment Blueprint: `/data/` Staging Tree v3.5
+
+All components are mapped 1:1 with the Android root filesystem starting from `/data/`:
+
+| Absolute Device Path | Permission | Owner | Component & Role |
+| :--- | :---: | :---: | :--- |
+| `/data/adb/p11.prop` | `644` | `root:root` | Pixel 11 Pro XL property file (target of KPM `openat` syscall redirection) |
+| `/data/adb/kpm/heo-ring0-companion.kpm` | `644` | `root:root` | Ring 0 EL1 prctl bridge, credentials elevator, kernel memory access |
+| `/data/adb/kpm/heo-scheduler-titan.kpm` | `644` | `root:root` | Ring 0 EL1 Metis VIP scheduler, task affinity steering |
+| `/data/adb/kpm/pixel11-camera-safe-spoofer.kpm` | `644` | `root:root` | Ring 0 EL1 `__NR_openat` + `__NR_newfstatat` syscall redirection with Leica Camera Whitelist |
+| `/data/adb/kpm/pseudo-mglru-supreme.kpm` | `644` | `root:root` | Ring 0 EL1 Multi-Gen LRU memory eviction engine |
+| `/data/adb/kpm/susfs-stealth-root.kpm` | `644` | `root:root` | Ring 0 EL1 Multi-Syscall root cloaking |
+| `/data/adb/modules/pixel11_kodiak_zygisk/module.prop` | `644` | `root:root` | APatch/KernelSU module metadata (v3.5, versionCode 350) |
+| `/data/adb/modules/pixel11_kodiak_zygisk/service.sh` | `755` | `root:root` | Boot service script (auto-deploys binaries, unlocks ptrace scope) |
+| `/data/adb/modules/pixel11_kodiak_zygisk/zygisk/arm64-v8a.so` | `755` | `root:root` | Zygisk in-process library (Zygote Tamer `preAppSpecialize` + Pixel 11 JNI/PLT spoofer) |
+| `/data/adb/modules/pixel11_kodiak_zygisk/heo/bin/heo_ptrace_tracer` | `755` | `root:root` | Native ARM64 C PTrace executable |
+| `/data/adb/modules/pixel11_kodiak_zygisk/system/product/etc/sysconfig/pixel_experience_2026.xml` | `644` | `root:root` | System product feature flags for Google Photos unlimited preview |
+| `/data/adb/heo/bin/heo_ptrace_tracer` | `755` | `root:root` | System-wide accessible Native C PTrace utility |
+| `/data/adb/heo/tamer_rules.txt` | `644` | `root:root` | Zygote process rules (`DEMOTE`, `BOOST`, `BLOCK`) |
+| `/data/adb/heo/SOVEREIGN_CONSTITUTION.md` | `644` | `root:root` | Inviolable 5-article Sovereign Constitution |
