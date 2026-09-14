@@ -1,4 +1,4 @@
-﻿/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * KPM: HEO Ring 0 Sovereign Companion v4.0 Ultimate Supreme
  * Target: Xiaomi 12S (mayfly) - Snapdragon 8+ Gen 1 (SM8475) - Linux Kernel 5.10.x
@@ -576,11 +576,11 @@ static long heo_companion_init(const char *args, const char *event, void *reserv
     /* 4. Hook select_task_rq (Layer 4 Dynamic Fork Steering Engine) */
     p_select_task_rq = (void *)kallsyms_lookup_name("select_task_rq");
     if (p_select_task_rq) {
-        hook_err_t h_err = inline_hook_address(p_select_task_rq, 4, NULL, after_select_task_rq, NULL);
+        hook_err_t h_err = hook_wrap4(p_select_task_rq, (void *)0, after_select_task_rq, (void *)0);
         if (h_err == 0) {
             pr_info("[HEO-KPM] Layer 4 Task Steering Hook ACTIVE on select_task_rq.\n");
         } else {
-            pr_warn("[HEO-KPM] inline_hook_address(select_task_rq) returned: %d\n", h_err);
+            pr_warn("[HEO-KPM] hook_wrap4(select_task_rq) returned: %d\n", h_err);
         }
     } else {
         pr_warn("[HEO-KPM] select_task_rq symbol not found in kallsyms.\n");
@@ -595,7 +595,7 @@ static long heo_companion_exit(void *reserved) {
     pr_info("[HEO-KPM] Unloading HEO Ring 0 Sovereign Companion...\n");
     inline_unhook_syscalln(__NR_prctl, before_prctl_hook, NULL);
     if (p_select_task_rq) {
-        inline_unhook_address(p_select_task_rq, after_select_task_rq);
+        hook_unwrap(p_select_task_rq, (void *)0, after_select_task_rq);
     }
     authorized_task_ptr = 0;
     return 0;

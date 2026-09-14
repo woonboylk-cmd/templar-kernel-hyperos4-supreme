@@ -84,6 +84,11 @@ jobs:
             exit 1
           fi
           echo "VERIFIED: All 7 KPMs are 100% compliant with KernelPatch 5.10 loader (Zero GOT 311)."
+          echo "=== Auditing UNDEF External Symbols with llvm-nm ==="
+          for kpm in output_kpms/*.kpm; do
+            echo "--- UNDEF in $(basename $kpm) ---"
+            llvm-nm-14 -u "$kpm"
+          done
 
       - name: Package KPM Arsenal Archive
         run: |
