@@ -81,3 +81,24 @@ Authenticated Syscall: `prctl(0x48454F, cmd, arg2, arg3, arg4)`
    - `kpm-arsenal-kernel5.10-SM8475.zip`
 3. `/data/adb/kpm/`:
    - Persistent autoload directory for KernelPatch / APatch.
+
+---
+
+## 6. Tier 2 Zygisk & Native PTrace Suite v3.5 (Zero-Placebo Certified)
+
+### 6.1. Zygote Tamer Engine (`pixel11_zygisk.cpp`)
+- **Execution Hook**: `preAppSpecialize` (runs inside newly forked app process with UID 0 before dropping privileges).
+- **Rule Source**: `/data/adb/heo/tamer_rules.txt` (fallback: `/data/local/tmp/heo_tamer.txt`).
+- **Actions**:
+  - `DEMOTE`: `sched_setaffinity` to CPUs 0-3 (Cortex-A510 LITTLE) + `setpriority(PRIO_PROCESS, 0, 19)`.
+  - `BOOST`: `sched_setaffinity` to CPUs 4-7 (Cortex-A710 MID & Cortex-X2 PRIME) + `setpriority(PRIO_PROCESS, 0, -10)`.
+  - `BLOCK`: Immediate `_exit(0)` before ART runtime initialization.
+- **Protection**: Strict whitelist for Camera packages, SystemUI, and HEO APK.
+
+### 6.2. Native C PTrace Tracer (`heo_ptrace_tracer.c`)
+- **Binary Target**: `/data/adb/heo/bin/heo_ptrace_tracer` (ARM64 ELF executable).
+- **Commands**:
+  - `inspect <pid>`: Reads `/proc/<pid>/status` and `/proc/<pid>/cmdline`.
+  - `attach <pid>`: Executes `ptrace(PTRACE_ATTACH)`, extracts `user_pt_regs` via `NT_PRSTATUS`, prints JSON telemetry, and detaches cleanly.
+  - `dump <pid> <hex_addr> <len>`: Reads memory directly via `/proc/<pid>/mem`.
+- **Integrity**: Completely replaced legacy `kill -SIGSTOP` placeholder simulation in `PTraceHookEngine.kt`.

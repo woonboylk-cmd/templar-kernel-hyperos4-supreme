@@ -1,4 +1,4 @@
-name: Build Pixel 11 Pro XL Zygisk Module
+﻿name: Build Pixel 11 Pro XL Zygisk & HEO PTrace Suite
 
 on:
   workflow_dispatch:
@@ -15,25 +15,54 @@ jobs:
         with:
           ndk-version: r26b
 
-      - name: Build Zygisk Native Library
+      - name: Build Zygisk Library & Native PTrace Tracer
         run: |
+          echo "=== Building Zygisk & PTrace Tracer via NDK ==="
           ndk-build -C zygisk_src/jni
 
-      - name: Assemble Magisk / APatch Module
+          ls -la zygisk_src/libs/arm64-v8a/
+
+      - name: Assemble Magisk / APatch Module & Standalone Binaries
         run: |
           mkdir -p module_pkg/zygisk
+          mkdir -p module_pkg/heo/bin
           mkdir -p module_pkg/system/product/etc/sysconfig
+          mkdir -p output_artifacts
 
-          cp zygisk_src/libs/arm64-v8a/libpixel11_zygisk.so module_pkg/zygisk/arm64-v8a.so
+          # Copy binaries
+          cp -f zygisk_src/libs/arm64-v8a/libpixel11_zygisk.so module_pkg/zygisk/arm64-v8a.so
+          cp -f zygisk_src/libs/arm64-v8a/heo_ptrace_tracer module_pkg/heo/bin/heo_ptrace_tracer
+          chmod 755 module_pkg/heo/bin/heo_ptrace_tracer
+
+          # Standalone copies for direct ADB push
+          cp -f zygisk_src/libs/arm64-v8a/libpixel11_zygisk.so output_artifacts/arm64-v8a.so
+          cp -f zygisk_src/libs/arm64-v8a/heo_ptrace_tracer output_artifacts/heo_ptrace_tracer
 
           cat << 'EOF' > module_pkg/module.prop
           id=pixel11_kodiak_zygisk
-          name=Pixel 11 Pro XL (Kodiak) Zygisk Spoofer
-          version=v3.0
-          versionCode=300
+          name=Pixel 11 Pro XL & HEO Zygote Tamer Suite
+          version=v3.5
+          versionCode=350
           author=Antigravity & vric
-          description=Pure Zygisk in-process Build spoofer for Google Photos & GMS with 100% Leica Camera Whitelist. Zero post-fs, zero bootloop risk.
+          description=Kodiak Pixel 11 Identity + HEO Sovereign Zygote Process Tamer (DEMOTE/BOOST/BLOCK) + ARM64 Native PTrace Tracer. Zero placebo.
           EOF
+
+          cat << 'EOF' > module_pkg/service.sh
+          #!/system/bin/sh
+          MODDIR=${0%/*}
+
+          # Deploy HEO native binaries to system path
+          mkdir -p /data/adb/heo/bin
+          cp -f "$MODDIR/heo/bin/heo_ptrace_tracer" /data/adb/heo/bin/heo_ptrace_tracer
+          chmod 755 /data/adb/heo/bin/heo_ptrace_tracer
+          chown root:root /data/adb/heo/bin/heo_ptrace_tracer
+
+          # Ensure Yama ptrace scope is unrestricted
+          if [ -f /proc/sys/kernel/yama/ptrace_scope ]; then
+              echo 0 > /proc/sys/kernel/yama/ptrace_scope 2>/dev/null
+          fi
+          EOF
+          chmod 755 module_pkg/service.sh
 
           cat << 'EOF' > module_pkg/system/product/etc/sysconfig/pixel_experience_2026.xml
           <?xml version="1.0" encoding="utf-8"?>
@@ -53,10 +82,17 @@ jobs:
           EOF
 
           cd module_pkg
-          zip -r ../Pixel_11_Pro_XL_Kodiak_Zygisk.zip .
+          zip -r ../output_artifacts/Pixel_11_Pro_XL_Kodiak_Zygisk_v3.5.zip .
+          cd ..
 
-      - name: Upload Module Artifact
+          cd output_artifacts
+          sha256sum * > SHA256SUMS
+          md5sum * > MD5SUMS
+          cat MD5SUMS
+          cd ..
+
+      - name: Upload Module & Binary Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Pixel-11-Pro-XL-Kodiak-Zygisk-Module
-          path: Pixel_11_Pro_XL_Kodiak_Zygisk.zip
+          name: heo-zygisk-ptrace-SM8475
+          path: output_artifacts/*

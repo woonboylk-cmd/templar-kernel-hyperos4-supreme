@@ -1,11 +1,32 @@
+﻿/**
+ * Pixel 11 Pro XL Identity Engine & HEO Sovereign Zygote Tamer v3.5
+ *
+ * Capabilities:
+ * 1. Pixel 11 Pro XL Identity Spoofing for Google Ecosystem & Photos
+ * 2. Zero-touch Camera Whitelist protection (Leica / Xiaomi Camera Safe)
+ * 3. HEO Sovereign Zygote Tamer:
+ *    - DEMOTE: Pin to LITTLE cores 0-3 (Cortex-A510) and set Nice 19
+ *    - BOOST: Pin to MID/PRIME cores 4-7 (Cortex-A710/X2) and set Nice -10
+ *    - BLOCK: Immediately terminate at fork (_exit(0)) before ART initializes
+ *
+ * Copyright (c) 2026 vric & Antigravity. Sovereign Constitution Compliant.
+ */
+
+#define _GNU_SOURCE
 #include "zygisk.hpp"
 #include <android/log.h>
 #include <jni.h>
 #include <string.h>
+#include <strings.h>
 #include <string>
 #include <sys/system_properties.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <sched.h>
+#include <sys/resource.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #define LOG_TAG "Pixel11Spoofer"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -57,6 +78,120 @@ static bool is_target_app(const char *pkg) {
         return true;
     }
     return false;
+}
+
+/* Protected apps that must NEVER be tamed or blocked */
+static bool is_protected_app(const char *pkg) {
+    if (!pkg) return true;
+    if (strcmp(pkg, "com.example.myapplication") == 0) return true;
+    if (strcmp(pkg, "android") == 0) return true;
+    if (strstr(pkg, "systemui")) return true;
+    if (strstr(pkg, "camera")) return true;
+    if (strstr(pkg, "cameraserver")) return true;
+    if (strstr(pkg, "gallery")) return true;
+    if (strstr(pkg, "apatch")) return true;
+    if (strstr(pkg, "ksu")) return true;
+    if (strstr(pkg, "magisk")) return true;
+    return false;
+}
+
+enum class TamerAction {
+    NONE,
+    DEMOTE,
+    BOOST,
+    BLOCK
+};
+
+static TamerAction evaluate_tamer_rule(const char *process_name) {
+    if (!process_name || is_protected_app(process_name)) return TamerAction::NONE;
+
+    const char *paths[] = {
+        "/data/adb/heo/tamer_rules.txt",
+        "/data/local/tmp/heo_tamer.txt"
+    };
+
+    FILE *fp = nullptr;
+    for (const char *p : paths) {
+        fp = fopen(p, "re");
+        if (fp) break;
+    }
+    if (!fp) return TamerAction::NONE;
+
+    char line[512];
+    TamerAction matched_action = TamerAction::NONE;
+
+    while (fgets(line, sizeof(line), fp)) {
+        char *ptr = line;
+        while (*ptr == ' ' || *ptr == '\t') ptr++;
+        if (*ptr == '#' || *ptr == '\r' || *ptr == '\n' || *ptr == '\0') continue;
+
+        char *colon = strchr(ptr, ':');
+        if (!colon) continue;
+
+        *colon = '\0';
+        char *target_pkg = ptr;
+        char *action_str = colon + 1;
+
+        char *end = target_pkg + strlen(target_pkg) - 1;
+        while (end > target_pkg && (*end == ' ' || *end == '\t')) *end-- = '\0';
+
+        while (*action_str == ' ' || *action_str == '\t') action_str++;
+        char *act_end = action_str + strlen(action_str) - 1;
+        while (act_end >= action_str && (*act_end == ' ' || *act_end == '\t' || *act_end == '\r' || *act_end == '\n')) *act_end-- = '\0';
+
+        if (strcmp(process_name, target_pkg) == 0 || strstr(process_name, target_pkg) != nullptr) {
+            if (strcasecmp(action_str, "DEMOTE") == 0) {
+                matched_action = TamerAction::DEMOTE;
+                break;
+            } else if (strcasecmp(action_str, "BOOST") == 0) {
+                matched_action = TamerAction::BOOST;
+                break;
+            } else if (strcasecmp(action_str, "BLOCK") == 0) {
+                matched_action = TamerAction::BLOCK;
+                break;
+            }
+        }
+    }
+
+    fclose(fp);
+    return matched_action;
+}
+
+static void apply_tamer_action(const char *process_name, TamerAction action) {
+    if (action == TamerAction::DEMOTE) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(0, &cpuset);
+        CPU_SET(1, &cpuset);
+        CPU_SET(2, &cpuset);
+        CPU_SET(3, &cpuset);
+        if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == 0) {
+            LOGI("[ZygoteTamer] DEMOTE enforced on %s: Pinned to LITTLE cores 0-3 (Cortex-A510)", process_name);
+        } else {
+            LOGE("[ZygoteTamer] sched_setaffinity DEMOTE failed for %s: %s", process_name, strerror(errno));
+        }
+        if (setpriority(PRIO_PROCESS, 0, 19) == 0) {
+            LOGI("[ZygoteTamer] DEMOTE enforced on %s: Nice set to 19 (idle priority)", process_name);
+        }
+    } else if (action == TamerAction::BOOST) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(4, &cpuset);
+        CPU_SET(5, &cpuset);
+        CPU_SET(6, &cpuset);
+        CPU_SET(7, &cpuset);
+        if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == 0) {
+            LOGI("[ZygoteTamer] BOOST enforced on %s: Pinned to MID/PRIME cores 4-7 (Cortex-A710/X2)", process_name);
+        } else {
+            LOGE("[ZygoteTamer] sched_setaffinity BOOST failed for %s: %s", process_name, strerror(errno));
+        }
+        if (setpriority(PRIO_PROCESS, 0, -10) == 0) {
+            LOGI("[ZygoteTamer] BOOST enforced on %s: Nice set to -10 (high priority)", process_name);
+        }
+    } else if (action == TamerAction::BLOCK) {
+        LOGI("[ZygoteTamer] BLOCK enforced on %s: Terminating process immediately before ART init", process_name);
+        _exit(0);
+    }
 }
 
 static void set_static_string_field(JNIEnv *env, jclass clazz, const char *field_name, const char *value) {
@@ -169,6 +304,13 @@ public:
         }
 
         if (process_name) {
+            // 1. HEO Zygote Tamer Enforcement (runs for any matched app at fork)
+            TamerAction act = evaluate_tamer_rule(process_name);
+            if (act != TamerAction::NONE) {
+                apply_tamer_action(process_name, act);
+            }
+
+            // 2. Pixel 11 Pro XL Identity Engine
             if (is_whitelisted_camera(process_name)) {
                 enable_spoof = false;
             } else if (is_target_app(process_name)) {
@@ -184,6 +326,7 @@ public:
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
+        (void)args;
         if (enable_spoof && env) {
             if (api && api->pltHookCommit) {
                 api->pltHookCommit();
