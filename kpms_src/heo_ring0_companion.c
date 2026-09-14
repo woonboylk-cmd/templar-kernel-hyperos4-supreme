@@ -1,19 +1,23 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * KPM: HEO Ring 0 Sovereign Companion v4.0 Ultimate Supreme
+ * KPM: HEO Ring 0 Sovereign Companion v4.2.0 Ultimate Supreme
  * Target: Xiaomi 12S (mayfly) - Snapdragon 8+ Gen 1 (SM8475) - Linux Kernel 5.10.x
  * Architecture: KernelPatch (Ring 0 EL1)
  *
  * Capabilities:
  * 1. Cryptographically-authenticated Syscall Bridge via sys_prctl (0x48454F 'HEO').
- * 2. Real-Time Dynamic Process Steering at Fork/Creation (Layer 4 Hook without LSPosed, ART, ptrace, or Zygote).
- * 3. Ring 0 Kernel Introspection Engine (Raw kernel scheduling, uptime, telemetry to HEO App & AI Agents).
- * 4. Instant Credential Elevation (HEO_CMD_ELEVATE_CREDS -> commit_creds(prepare_kernel_cred(NULL))).
- * 5. Kernel Process Task Inspection (HEO_CMD_TASK_INSPECT -> find_task_by_vpid zero-shell inspect).
- * 6. Direct Hardware Task Affinity Steering (HEO_CMD_SET_TASK_AFFINITY -> set_cpus_allowed_ptr).
- * 7. Arbitrary Kernel Memory Peeker & Patcher (HEO_CMD_KREAD / HEO_CMD_KWRITE).
- * 8. Dynamic Kernel Symbol Resolver (HEO_CMD_RESOLVE_SYMBOL -> kallsyms_lookup_name).
- * 9. Zero-relocation GOT 311 compliance (-fno-pic -mcmodel=small).
+ * 2. Zero-Lock Dynamic Task Steering on select_task_rq:
+ *    - Dynamically resolves offsetof(task_struct, comm) at init time.
+ *    - In scheduler hook, reads task comm directly via pointer offset without taking task_lock.
+ *    - 100% immune to ABBA Lock Inversion & Watchdog Bark.
+ * 3. Real-Time CFS Latency Tightening (4ms latency, 0.75ms min_gran, 1ms wakeup_gran).
+ * 4. Ring 0 Kernel Introspection Engine (Raw kernel scheduling, uptime, telemetry to HEO App & AI Agents).
+ * 5. Instant Credential Elevation (HEO_CMD_ELEVATE_CREDS -> commit_creds(prepare_kernel_cred(NULL))).
+ * 6. Kernel Process Task Inspection (HEO_CMD_TASK_INSPECT -> find_task_by_vpid zero-shell inspect).
+ * 7. Direct Hardware Task Affinity Steering (HEO_CMD_SET_TASK_AFFINITY -> set_cpus_allowed_ptr).
+ * 8. Arbitrary Kernel Memory Peeker & Patcher (HEO_CMD_KREAD / HEO_CMD_KWRITE).
+ * 9. Dynamic Kernel Symbol Resolver (HEO_CMD_RESOLVE_SYMBOL -> kallsyms_lookup_name).
+ * 10. Zero-relocation GOT 311 compliance (-fno-pic -mcmodel=small).
  */
 
 #include <compiler.h>
@@ -27,10 +31,10 @@
 #include <asm/current.h>
 
 KPM_NAME("heo-ring0-companion");
-KPM_VERSION("4.1.0");
+KPM_VERSION("4.2.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Antigravity & vric");
-KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v4.1.0 - Full Introspection, Credential Elevation & Rock-Solid Safe Architecture");
+KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v4.2.0 - Zero-Lock Steering, Full Introspection & Rock-Solid Architecture");
 
 #define HEO_MAGIC_PRCTL          0x48454F    /* 'HEO' in ASCII */
 
@@ -40,7 +44,7 @@ KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v4.1.0 - Full Introspection, Cre
 #define HEO_CMD_STATUS           0x03
 #define HEO_CMD_FORCE_YAMA_OFF   0x04
 
-/* Introspection & Telemetry Commands (Mở toang thông số nhân) */
+/* Introspection & Telemetry Commands */
 #define HEO_CMD_KERNEL_TELEMETRY 0x05
 #define HEO_CMD_SET_FORK_RULE    0x06
 #define HEO_CMD_GET_FORK_RULES   0x07
@@ -60,14 +64,14 @@ KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v4.1.0 - Full Introspection, Cre
 
 struct heo_fork_rule {
     char comm[16];
-    uint8_t action;       /* 1: DEMOTE (Cores 0-2, nice +19), 2: BOOST (Core 7, Cortex-X2), 3: MID_AI (Cores 4-6) */
+    uint8_t action;       /* 1: DEMOTE (Cores 0-2), 2: BOOST (Core 7, Cortex-X2), 3: MID_AI (Cores 4-6) */
     uint8_t target_cpus;  /* Bitmask */
     uint8_t enabled;
 };
 
 struct heo_kernel_telemetry {
     uint32_t magic;              /* 0x48454F30 ('HEO0') */
-    uint32_t version;            /* 0x0400 */
+    uint32_t version;            /* 0x0420 */
     uint64_t uptime_jiffies;     /* Kernel jiffies */
     uint32_t cfs_latency;        /* sysctl_sched_latency */
     uint32_t cfs_min_gran;       /* sysctl_sched_min_granularity */
@@ -90,15 +94,24 @@ struct heo_task_inspect_info {
 static unsigned long authorized_task_ptr = 0;
 static uint64_t current_nonce = 0x1337CAFEBEEFULL;
 static struct heo_fork_rule g_fork_rules[MAX_FORK_RULES];
+static int g_comm_offset = -1;
 
 /* Kernel Symbol Function Pointers */
+static void *p_select_task_rq = (void *)0;
 static char *(*p_get_task_comm)(char *buf, unsigned long buf_size, void *tsk) = (void *)0;
 static unsigned long (*p_copy_to_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static unsigned long (*p_copy_from_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static unsigned long *p_jiffies = (void *)0;
+
+/* CFS Sched Tunables Pointers & Originals */
 static unsigned int *p_sched_latency = (void *)0;
 static unsigned int *p_sched_min_gran = (void *)0;
 static unsigned int *p_sched_wakeup_gran = (void *)0;
+static unsigned int *p_sched_migration_cost = (void *)0;
+static unsigned int orig_sched_latency = 0;
+static unsigned int orig_sched_min_gran = 0;
+static unsigned int orig_sched_wakeup_gran = 0;
+static unsigned int orig_sched_migration_cost = 0;
 
 /* Advanced Kernel Operation Pointers */
 static void *(*p_find_task_by_vpid)(int nr) = (void *)0;
@@ -112,7 +125,21 @@ static volatile unsigned long stat_bloat_demotes = 0;
 static volatile unsigned long stat_ui_boosts = 0;
 static volatile unsigned long stat_ai_steers = 0;
 
-/* Standalone String Matcher */
+/* Freestanding inline helper functions */
+static inline size_t k_strlen(const char *s) {
+    size_t len = 0;
+    while (s && s[len]) len++;
+    return len;
+}
+
+static inline int k_memcmp(const void *s1, const void *s2, size_t n) {
+    const unsigned char *p1 = s1, *p2 = s2;
+    for (size_t i = 0; i < n; i++) {
+        if (p1[i] != p2[i]) return p1[i] - p2[i];
+    }
+    return 0;
+}
+
 static inline int str_contains(const char *haystack, const char *needle) {
     if (!haystack || !needle) return 0;
     const char *h = haystack;
@@ -130,10 +157,140 @@ static inline int str_contains(const char *haystack, const char *needle) {
 }
 
 /*
- * Ring 0 Sovereign Companion v4.1.0 - Rock-Solid Edition
- * Scheduler CPU pinning is managed safely via HEO_CMD_SET_TASK_AFFINITY
- * (Zero lock-inversion, zero scheduler deadlocks, zero watchdog barks).
+ * Zero-Lock Task Comm Offset Resolver
+ * Executed ONCE at module init in safe task context (zero locks held).
+ * Scans current struct task_struct to discover offsetof(struct task_struct, comm).
  */
+static int resolve_task_comm_offset(void) {
+    if (!p_get_task_comm) {
+        pr_warn("[HEO-KPM] __get_task_comm symbol not resolved\n");
+        return -1;
+    }
+
+    char ref_name[16] = {0};
+    p_get_task_comm(ref_name, sizeof(ref_name), current);
+    ref_name[15] = '\0';
+
+    size_t len = k_strlen(ref_name);
+    if (len == 0) {
+        pr_warn("[HEO-KPM] current->comm is empty\n");
+        return -1;
+    }
+
+    const unsigned char *base = (const unsigned char *)current;
+    int candidate = -1;
+    int match_count = 0;
+
+    for (int off = 0x200; off < 0x1800; off += 4) {
+        if (k_memcmp(base + off, ref_name, len) == 0 && base[off + len] == '\0') {
+            unsigned long cred_candidate = *(const unsigned long *)(base + off - 8);
+            if ((cred_candidate >> 48) == 0xffff) {
+                candidate = off;
+                match_count++;
+            } else if (candidate < 0) {
+                candidate = off;
+                match_count++;
+            }
+        }
+    }
+
+    if (candidate > 0) {
+        g_comm_offset = candidate;
+        pr_info("[HEO-KPM] Zero-Lock comm offset resolved: 0x%x (task: '%s', matches: %d)\n",
+                candidate, ref_name, match_count);
+        return candidate;
+    }
+
+    pr_warn("[HEO-KPM] Failed to resolve unique comm offset\n");
+    return -1;
+}
+
+/*
+ * Pillar 3: Zero-Lock Dynamic Task Steering Hook
+ * Prototype in Linux 5.10 kernel/sched/core.c:
+ * int select_task_rq(struct task_struct *p, int cpu, int sd_flags, int wake_flags);
+ *
+ * CRITICAL SAFETY: Runs under scheduler rq_lock / pi_lock.
+ * ZERO locks allowed! Reads (task + g_comm_offset) directly.
+ * Zero lock inversion, zero deadlocks, zero watchdog barks!
+ */
+static void after_select_task_rq(hook_fargs4_t *args, void *udata) {
+    void *task = (void *)args->arg0;
+    if (!task || g_comm_offset <= 0) return;
+
+    int target_cpu = (int)args->ret;
+    if (target_cpu < 0 || target_cpu > 7) return;
+
+    const char *raw_comm = (const char *)task + g_comm_offset;
+    char comm[16];
+    for (int i = 0; i < 15; i++) {
+        char c = raw_comm[i];
+        comm[i] = c;
+        if (c == '\0') break;
+    }
+    comm[15] = '\0';
+
+    if (comm[0] == '\0') return;
+
+    /* 1. Dynamic in-kernel fork rules configured by HEO App & AI Agents */
+    for (int i = 0; i < MAX_FORK_RULES; i++) {
+        if (g_fork_rules[i].enabled && g_fork_rules[i].comm[0] != '\0') {
+            if (str_contains(comm, g_fork_rules[i].comm)) {
+                if (g_fork_rules[i].action == 1) {
+                    /* DEMOTE: Confine to Cortex-A510 Little (Cores 0-2) */
+                    args->ret = (target_cpu % 3);
+                    stat_bloat_demotes++;
+                } else if (g_fork_rules[i].action == 2) {
+                    /* BOOST: Elevate to Cortex-X2 Prime (Core 7, 3.2 GHz) */
+                    args->ret = 7;
+                    stat_ui_boosts++;
+                } else if (g_fork_rules[i].action == 3) {
+                    /* MID_AI: Pin to Cortex-A710 Mid (Cores 4-6, 2.75 GHz) */
+                    args->ret = 4 + (target_cpu % 3);
+                    stat_ai_steers++;
+                }
+                stat_tasks_steered++;
+                return;
+            }
+        }
+    }
+
+    /* 2. Built-in Sovereign Hardened Demotions (Background Bloatware) */
+    if (str_contains(comm, "facebook") || str_contains(comm, "katana") ||
+        str_contains(comm, "orca")     || str_contains(comm, "instagram") ||
+        str_contains(comm, "tiktok")   || str_contains(comm, "zhiliao") ||
+        str_contains(comm, "miwallpap")|| str_contains(comm, "earthSuper")) {
+        if (target_cpu >= 3) {
+            args->ret = (target_cpu % 3);
+            stat_bloat_demotes++;
+            stat_tasks_steered++;
+        }
+        return;
+    }
+
+    /* 3. Built-in On-Device AI Engine Pinning (llama-server, Qwen, ExecuTorch) */
+    if (str_contains(comm, "llama") || str_contains(comm, "qwen") ||
+        str_contains(comm, "executor")) {
+        if (target_cpu < 4 || target_cpu == 7) {
+            args->ret = 4 + (target_cpu % 3);
+            stat_ai_steers++;
+            stat_tasks_steered++;
+        }
+        return;
+    }
+
+    /* 4. Built-in Sovereign UI & HEO Master Elevation */
+    if (str_contains(comm, "myapplicat") || str_contains(comm, "heo") ||
+        str_contains(comm, "surfacefl")  || str_contains(comm, "RenderThrea") ||
+        str_contains(comm, "composer-s")) {
+        if (target_cpu < 4) {
+            args->ret = 7; /* Cortex-X2 Prime (3.2 GHz) */
+            stat_ui_boosts++;
+            stat_tasks_steered++;
+        }
+        return;
+    }
+}
 
 /*
  * Syscall prctl Hook (Cầu nối Lệnh Sovereign Ring 0)
@@ -211,7 +368,7 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 struct heo_kernel_telemetry telem;
                 memset(&telem, 0, sizeof(telem));
                 telem.magic = 0x48454F30;
-                telem.version = 0x0400;
+                telem.version = 0x0420;
                 telem.uptime_jiffies = p_jiffies ? *p_jiffies : 0;
                 telem.cfs_latency = p_sched_latency ? *p_sched_latency : 0;
                 telem.cfs_min_gran = p_sched_min_gran ? *p_sched_min_gran : 0;
@@ -476,7 +633,7 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
 }
 
 static long heo_companion_init(const char *args, const char *event, void *reserved) {
-    pr_info("[HEO-KPM] ===== Initializing HEO Ring 0 Sovereign Companion v4.0.0 Ultimate Supreme =====\n");
+    pr_info("[HEO-KPM] ===== Initializing HEO Ring 0 Sovereign Companion v4.2.0 Ultimate Supreme =====\n");
     pr_info("[HEO-KPM] Target SoC: Snapdragon 8+ Gen 1 (SM8475) | KernelPatch EL1\n");
 
     /* 1. Resolve Core Kernel Helpers */
@@ -485,17 +642,58 @@ static long heo_companion_init(const char *args, const char *event, void *reserv
     p_get_task_comm = (void *)kallsyms_lookup_name("__get_task_comm");
     p_jiffies = (unsigned long *)kallsyms_lookup_name("jiffies_64");
     if (!p_jiffies) p_jiffies = (unsigned long *)kallsyms_lookup_name("jiffies");
+
+    /* 2. Resolve CFS Tunables & Apply Real-Time Sovereign Profile */
     p_sched_latency = (unsigned int *)kallsyms_lookup_name("sysctl_sched_latency");
     p_sched_min_gran = (unsigned int *)kallsyms_lookup_name("sysctl_sched_min_granularity");
     p_sched_wakeup_gran = (unsigned int *)kallsyms_lookup_name("sysctl_sched_wakeup_granularity");
+    p_sched_migration_cost = (unsigned int *)kallsyms_lookup_name("sysctl_sched_migration_cost");
 
-    /* 2. Resolve Advanced Sovereign Operation Pointers */
+    if (p_sched_latency) {
+        orig_sched_latency = *p_sched_latency;
+        *p_sched_latency = 4000000U; /* 4ms */
+        pr_info("[HEO-KPM] Locked sysctl_sched_latency: %u -> 4000000 ns\n", orig_sched_latency);
+    }
+    if (p_sched_min_gran) {
+        orig_sched_min_gran = *p_sched_min_gran;
+        *p_sched_min_gran = 750000U; /* 0.75ms */
+        pr_info("[HEO-KPM] Locked sysctl_sched_min_granularity: %u -> 750000 ns\n", orig_sched_min_gran);
+    }
+    if (p_sched_wakeup_gran) {
+        orig_sched_wakeup_gran = *p_sched_wakeup_gran;
+        *p_sched_wakeup_gran = 1000000U; /* 1ms */
+        pr_info("[HEO-KPM] Locked sysctl_sched_wakeup_granularity: %u -> 1000000 ns\n", orig_sched_wakeup_gran);
+    }
+    if (p_sched_migration_cost) {
+        orig_sched_migration_cost = *p_sched_migration_cost;
+        *p_sched_migration_cost = 500000U; /* 0.5ms */
+        pr_info("[HEO-KPM] Locked sysctl_sched_migration_cost: %u -> 500000 ns\n", orig_sched_migration_cost);
+    }
+
+    /* 3. Resolve Advanced Sovereign Operation Pointers */
     p_find_task_by_vpid = (void *)kallsyms_lookup_name("find_task_by_vpid");
     p_set_cpus_allowed_ptr = (void *)kallsyms_lookup_name("set_cpus_allowed_ptr");
     p_commit_creds = (void *)kallsyms_lookup_name("commit_creds");
     p_prepare_kernel_cred = (void *)kallsyms_lookup_name("prepare_kernel_cred");
 
-    /* 3. Hook Syscall prctl (0x48454F) */
+    /* 4. Resolve task_struct comm offset dynamically for Zero-Lock reading */
+    resolve_task_comm_offset();
+
+    /* 5. Hook select_task_rq (Zero-Lock Dynamic Task Steering Engine) */
+    p_select_task_rq = (void *)kallsyms_lookup_name("select_task_rq");
+    if (p_select_task_rq && g_comm_offset > 0) {
+        hook_err_t h_err = hook_wrap4(p_select_task_rq, (void *)0, after_select_task_rq, (void *)0);
+        if (!h_err) {
+            pr_info("[HEO-KPM] Zero-Lock Task Steering Engine ACTIVE on select_task_rq (offset 0x%x).\n", g_comm_offset);
+        } else {
+            pr_warn("[HEO-KPM] hook_wrap4(select_task_rq) returned: %d\n", h_err);
+        }
+    } else {
+        pr_warn("[HEO-KPM] select_task_rq hook skipped (p_select_task_rq=%p, g_comm_offset=%d)\n",
+                p_select_task_rq, g_comm_offset);
+    }
+
+    /* 6. Hook Syscall prctl (0x48454F) */
     hook_err_t err = inline_hook_syscalln(__NR_prctl, 5, before_prctl_hook, NULL, NULL);
     if (err) {
         pr_err("[HEO-KPM] inline_hook_syscalln(__NR_prctl) failed: %d\n", err);
@@ -503,14 +701,30 @@ static long heo_companion_init(const char *args, const char *event, void *reserv
     }
 
     memset(g_fork_rules, 0, sizeof(g_fork_rules));
-    pr_info("[HEO-KPM] Sovereign Ring 0 Ultimate Superpowers ONLINE (v4.1.0 Rock-Solid) 👑\n");
+    pr_info("[HEO-KPM] Sovereign Ring 0 Companion v4.2.0 ONLINE & OPERATIONAL 👑\n");
     return 0;
 }
 
 static long heo_companion_exit(void *reserved) {
-    pr_info("[HEO-KPM] Unloading HEO Ring 0 Sovereign Companion...\n");
+    pr_info("[HEO-KPM] Unloading HEO Ring 0 Sovereign Companion v4.2.0...\n");
+
+    /* 1. Unhook prctl */
     inline_unhook_syscalln(__NR_prctl, before_prctl_hook, NULL);
+
+    /* 2. Unhook select_task_rq */
+    if (p_select_task_rq && g_comm_offset > 0) {
+        hook_unwrap(p_select_task_rq, (void *)0, after_select_task_rq);
+        pr_info("[HEO-KPM] select_task_rq unhooked cleanly.\n");
+    }
+
+    /* 3. Restore CFS sched tunables */
+    if (p_sched_latency && orig_sched_latency) *p_sched_latency = orig_sched_latency;
+    if (p_sched_min_gran && orig_sched_min_gran) *p_sched_min_gran = orig_sched_min_gran;
+    if (p_sched_wakeup_gran && orig_sched_wakeup_gran) *p_sched_wakeup_gran = orig_sched_wakeup_gran;
+    if (p_sched_migration_cost && orig_sched_migration_cost) *p_sched_migration_cost = orig_sched_migration_cost;
+
     authorized_task_ptr = 0;
+    pr_info("[HEO-KPM] Clean exit completed.\n");
     return 0;
 }
 

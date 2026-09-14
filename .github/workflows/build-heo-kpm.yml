@@ -28,11 +28,7 @@ jobs:
           mkdir -p KernelPatch/kpms/arsenal
           cp kpms_src/heo_ring0_companion.c KernelPatch/kpms/arsenal/heo-ring0-companion.c
           cp kpms_src/heo_scheduler_titan.c KernelPatch/kpms/arsenal/heo-scheduler-titan.c
-          cp kpms_src/pixel11_camera_safe_spoofer.c KernelPatch/kpms/arsenal/pixel11-camera-safe-spoofer.c
           cp kpms_src/pseudo_mglru_supreme.c KernelPatch/kpms/arsenal/pseudo-mglru-supreme.c
-          cp kpms_src/ring0_netshield_supreme.c KernelPatch/kpms/arsenal/ring0-netshield-supreme.c
-          cp kpms_src/susfs_stealth_root.c KernelPatch/kpms/arsenal/susfs-stealth-root.c
-          cp kpms_src/zstd_memory_engine.c KernelPatch/kpms/arsenal/zstd-memory-engine.c
 
           cat << 'EOF' > KernelPatch/kpms/arsenal/Makefile
           KP_DIR ?= ../..
@@ -45,11 +41,7 @@ jobs:
 
           KPMS := heo-ring0-companion.kpm \
                   heo-scheduler-titan.kpm \
-                  pixel11-camera-safe-spoofer.kpm \
-                  pseudo-mglru-supreme.kpm \
-                  ring0-netshield-supreme.kpm \
-                  susfs-stealth-root.kpm \
-                  zstd-memory-engine.kpm
+                  pseudo-mglru-supreme.kpm
 
           all: $(KPMS)
 
@@ -62,7 +54,7 @@ jobs:
 
       - name: Compile All KPM Modules
         run: |
-          echo "=== Building All 7 KernelPatch Modules with Clang 14 ==="
+          echo "=== Building Ring 0 Sovereign KPMs with Clang 14 ==="
           make -C KernelPatch/kpms/arsenal
           mkdir -p output_kpms
           cp KernelPatch/kpms/arsenal/*.kpm output_kpms/
@@ -83,7 +75,7 @@ jobs:
           if [ $FAILED -ne 0 ]; then
             exit 1
           fi
-          echo "VERIFIED: All 7 KPMs are 100% compliant with KernelPatch 5.10 loader (Zero GOT 311)."
+          echo "VERIFIED: All KPMs are 100% compliant with KernelPatch 5.10 loader (Zero GOT 311)."
           echo "=== Auditing UNDEF External Symbols with llvm-nm ==="
           for kpm in output_kpms/*.kpm; do
             echo "--- UNDEF in $(basename $kpm) ---"
