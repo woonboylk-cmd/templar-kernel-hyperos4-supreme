@@ -28,13 +28,14 @@
 #include <linux/printk.h>
 #include <uapi/asm-generic/unistd.h>
 #include <syscall.h>
+#include <kputils.h>
 #include <asm/current.h>
 
 KPM_NAME("heo-ring0-companion");
-KPM_VERSION("5.1.0");
+KPM_VERSION("5.2.1");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Antigravity & vric");
-KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v5.1 - Pure Ring 0 Engine, Zero Filesystem Hook, Hardware MMU Protected");
+KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v5.2.1 - Pure Ring 0 Engine, 6 Superpowers, Safe Syscall Hook");
 
 /* KPM-safe memory helpers: inlined by compiler, zero external BL memcpy/memset */
 static __always_inline void *kpm_memset(void *dst, int c, unsigned long n)
@@ -185,6 +186,18 @@ static void *p_select_task_rq = (void *)0;
 static char *(*p_get_task_comm)(char *buf, unsigned long buf_size, void *tsk) = (void *)0;
 static unsigned long (*p_copy_to_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static unsigned long (*p_copy_from_user)(void *to, const void *from, unsigned long n) = (void *)0;
+
+static inline unsigned long safe_copy_to_user(void *to, const void *from, unsigned long n) {
+    if (p_copy_to_user) return safe_copy_to_user(to, from, n);
+    return compat_copy_to_user(to, from, (int)n);
+}
+
+static inline unsigned long safe_copy_from_user(void *to, const void *from, unsigned long n) {
+    if (p_copy_from_user) return safe_copy_from_user(to, from, n);
+    if (compat_strncpy_from_user((char *)to, (const char *)from, (long)n) >= 0) return 0;
+    return (unsigned long)-14;
+}
+
 static long (*p_knofault)(void *dst, const void *src, size_t size) = (void *)0;
 static void *(*p_ioremap_cache)(unsigned long phys_addr, size_t size) = (void *)0;
 static void (*p_iounmap)(void *addr) = (void *)0;
@@ -437,7 +450,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         case HEO_CMD_KERNEL_TELEMETRY: {
             if (authorized_task_ptr == task_now) {
                 void *user_buf = (void *)syscall_argn(args, 2);
-                if (!user_buf || !p_copy_to_user) {
+                if (!user_buf) {
                     args->ret = (uint64_t)-1;
                     break;
                 }
@@ -461,7 +474,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 telem.ai_steers = stat_ai_steers;
                 telem.active_rules_count = active_rules;
 
-                if (p_copy_to_user(user_buf, &telem, sizeof(telem)) == 0) {
+                if (safe_copy_to_user(user_buf, &telem, sizeof(telem)) == 0) {
                     args->ret = 0;
                 } else {
                     args->ret = (uint64_t)-14; /* -EFAULT */
@@ -475,13 +488,13 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         case HEO_CMD_SET_FORK_RULE: {
             if (authorized_task_ptr == task_now) {
                 void *user_buf = (void *)syscall_argn(args, 2);
-                if (!user_buf || !p_copy_from_user) {
+                if (!user_buf) {
                     args->ret = (uint64_t)-1;
                     break;
                 }
 
                 struct heo_fork_rule rule;
-                if (p_copy_from_user(&rule, user_buf, sizeof(rule)) != 0) {
+                if (safe_copy_from_user(&rule, user_buf, sizeof(rule)) != 0) {
                     args->ret = (uint64_t)-14;
                     break;
                 }
@@ -521,12 +534,12 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         case HEO_CMD_GET_FORK_RULES: {
             if (authorized_task_ptr == task_now) {
                 void *user_buf = (void *)syscall_argn(args, 2);
-                if (!user_buf || !p_copy_to_user) {
+                if (!user_buf) {
                     args->ret = (uint64_t)-1;
                     break;
                 }
 
-                if (p_copy_to_user(user_buf, g_fork_rules, sizeof(g_fork_rules)) == 0) {
+                if (safe_copy_to_user(user_buf, g_fork_rules, sizeof(g_fork_rules)) == 0) {
                     args->ret = 0;
                 } else {
                     args->ret = (uint64_t)-14;
@@ -579,7 +592,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
             if (authorized_task_ptr == task_now) {
                 int target_pid = (int)syscall_argn(args, 2);
                 void *user_buf = (void *)syscall_argn(args, 3);
-                if (!user_buf || !p_copy_to_user || !p_find_task_by_vpid || !p_get_task_comm) {
+                if (!user_buf || !p_find_task_by_vpid || !p_get_task_comm) {
                     args->ret = (uint64_t)-1;
                     break;
                 }
@@ -598,7 +611,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                     info.exists = 0;
                 }
 
-                if (p_copy_to_user(user_buf, &info, sizeof(info)) == 0) {
+                if (safe_copy_to_user(user_buf, &info, sizeof(info)) == 0) {
                     args->ret = info.exists ? 0 : (uint64_t)-3; /* ESRCH */
                 } else {
                     args->ret = (uint64_t)-14;
@@ -617,7 +630,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 unsigned long kaddr = (unsigned long)syscall_argn(args, 2);
                 void *user_buf = (void *)syscall_argn(args, 3);
                 unsigned long len = (unsigned long)syscall_argn(args, 4);
-                if (!user_buf || !p_copy_to_user || len == 0 || len > sizeof(s_kread_buf)) {
+                if (!user_buf || len == 0 || len > sizeof(s_kread_buf)) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
@@ -626,9 +639,9 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                         args->ret = (uint64_t)-14;
                         break;
                     }
-                    args->ret = (p_copy_to_user(user_buf, s_kread_buf, len) == 0) ? 0 : (uint64_t)-14;
+                    args->ret = (safe_copy_to_user(user_buf, s_kread_buf, len) == 0) ? 0 : (uint64_t)-14;
                 } else {
-                    args->ret = (p_copy_to_user(user_buf, (const void *)kaddr, len) == 0) ? 0 : (uint64_t)-14;
+                    args->ret = (safe_copy_to_user(user_buf, (const void *)kaddr, len) == 0) ? 0 : (uint64_t)-14;
                 }
             } else {
                 args->ret = (uint64_t)-1;
@@ -644,11 +657,11 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 unsigned long kaddr = (unsigned long)syscall_argn(args, 2);
                 const void *user_buf = (const void *)syscall_argn(args, 3);
                 unsigned long len = (unsigned long)syscall_argn(args, 4);
-                if (!user_buf || !p_copy_from_user || len == 0 || len > sizeof(s_kwrite_buf)) {
+                if (!user_buf || len == 0 || len > sizeof(s_kwrite_buf)) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
-                if (p_copy_from_user(s_kwrite_buf, user_buf, len) != 0) {
+                if (safe_copy_from_user(s_kwrite_buf, user_buf, len) != 0) {
                     args->ret = (uint64_t)-14;
                     break;
                 }
@@ -670,13 +683,13 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         case HEO_CMD_RESOLVE_SYMBOL: {
             if (authorized_task_ptr == task_now) {
                 const void *user_name = (const void *)syscall_argn(args, 2);
-                if (!user_name || !p_copy_from_user) {
+                if (!user_name) {
                     args->ret = 0;
                     break;
                 }
                 char sym_name[64];
                 kpm_memset(sym_name, 0, sizeof(sym_name));
-                if (p_copy_from_user(sym_name, user_name, 63) == 0) {
+                if (safe_copy_from_user(sym_name, user_name, 63) == 0) {
                     sym_name[63] = '\0';
                     unsigned long addr = (unsigned long)kallsyms_lookup_name(sym_name);
                     args->ret = addr;
@@ -724,12 +737,12 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
             if (authorized_task_ptr == task_now) {
                 void *user_req = (void *)syscall_argn(args, 2);
                 void *user_resp = (void *)syscall_argn(args, 3);
-                if (!user_req || !user_resp || !p_copy_from_user || !p_copy_to_user) {
+                if (!user_req || !user_resp) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
                 struct heo_chain_req req;
-                if (p_copy_from_user(&req, user_req, sizeof(req)) != 0) { args->ret = (uint64_t)-14; break; }
+                if (safe_copy_from_user(&req, user_req, sizeof(req)) != 0) { args->ret = (uint64_t)-14; break; }
                 if (req.num_hops > 8 || req.read_len > sizeof(u_resp_buf.chain.data)) { args->ret = (uint64_t)-22; break; }
 
                 uint64_t curr = req.base_ptr;
@@ -760,7 +773,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                         u_resp_buf.chain.bytes_read = req.read_len;
                     }
                 }
-                args->ret = (p_copy_to_user(user_resp, &u_resp_buf.chain, sizeof(u_resp_buf.chain)) == 0) ? 0 : (uint64_t)-14;
+                args->ret = (safe_copy_to_user(user_resp, &u_resp_buf.chain, sizeof(u_resp_buf.chain)) == 0) ? 0 : (uint64_t)-14;
             } else {
                 args->ret = (uint64_t)-1;
             }
@@ -772,12 +785,12 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
             if (authorized_task_ptr == task_now) {
                 void *user_filter = (void *)syscall_argn(args, 2);
                 void *user_resp = (void *)syscall_argn(args, 3);
-                if (!user_filter || !user_resp || !p_copy_from_user || !p_copy_to_user) {
+                if (!user_filter || !user_resp) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
                 struct heo_kallsyms_req req;
-                if (p_copy_from_user(&req, user_filter, sizeof(req)) != 0) { args->ret = (uint64_t)-14; break; }
+                if (safe_copy_from_user(&req, user_filter, sizeof(req)) != 0) { args->ret = (uint64_t)-14; break; }
                 req.filter[31] = '\0';
                 kpm_memset(&u_resp_buf.kallsyms, 0, sizeof(u_resp_buf.kallsyms));
 
@@ -787,7 +800,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                     kpm_memcpy(u_resp_buf.kallsyms.entries[0].name, req.filter, 32);
                     u_resp_buf.kallsyms.entries[0].addr = addr;
                 }
-                args->ret = (p_copy_to_user(user_resp, &u_resp_buf.kallsyms, sizeof(u_resp_buf.kallsyms)) == 0) ? 0 : (uint64_t)-14;
+                args->ret = (safe_copy_to_user(user_resp, &u_resp_buf.kallsyms, sizeof(u_resp_buf.kallsyms)) == 0) ? 0 : (uint64_t)-14;
             } else {
                 args->ret = (uint64_t)-1;
             }
@@ -799,12 +812,12 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
             if (authorized_task_ptr == task_now) {
                 void *user_req = (void *)syscall_argn(args, 2);
                 void *user_resp = (void *)syscall_argn(args, 3);
-                if (!user_req || !user_resp || !p_copy_from_user || !p_copy_to_user) {
+                if (!user_req || !user_resp) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
                 struct heo_list_walk_req req;
-                if (p_copy_from_user(&req, user_req, sizeof(req)) != 0) { args->ret = (uint64_t)-14; break; }
+                if (safe_copy_from_user(&req, user_req, sizeof(req)) != 0) { args->ret = (uint64_t)-14; break; }
                 if (req.max_count > 32) req.max_count = 32;
 
                 kpm_memset(&u_resp_buf.list_walk, 0, sizeof(u_resp_buf.list_walk));
@@ -822,7 +835,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                     curr = next_node;
                 }
                 u_resp_buf.list_walk.count = c;
-                args->ret = (p_copy_to_user(user_resp, &u_resp_buf.list_walk, sizeof(u_resp_buf.list_walk)) == 0) ? 0 : (uint64_t)-14;
+                args->ret = (safe_copy_to_user(user_resp, &u_resp_buf.list_walk, sizeof(u_resp_buf.list_walk)) == 0) ? 0 : (uint64_t)-14;
             } else {
                 args->ret = (uint64_t)-1;
             }
@@ -853,7 +866,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 unsigned long paddr = (unsigned long)syscall_argn(args, 2);
                 void *user_buf = (void *)syscall_argn(args, 3);
                 unsigned long len = (unsigned long)syscall_argn(args, 4);
-                if (!user_buf || !p_copy_to_user || !p_ioremap_cache || !p_iounmap || len == 0 || len > sizeof(u_resp_buf.raw)) {
+                if (!user_buf || !p_ioremap_cache || !p_iounmap || len == 0 || len > sizeof(u_resp_buf.raw)) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
@@ -865,7 +878,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                     kpm_memcpy(u_resp_buf.raw, mapped, len);
                 }
                 p_iounmap(mapped);
-                args->ret = (p_copy_to_user(user_buf, u_resp_buf.raw, len) == 0) ? 0 : (uint64_t)-14;
+                args->ret = (safe_copy_to_user(user_buf, u_resp_buf.raw, len) == 0) ? 0 : (uint64_t)-14;
             } else {
                 args->ret = (uint64_t)-1;
             }
@@ -879,7 +892,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 uint32_t offset = (uint32_t)syscall_argn(args, 3);
                 void *user_buf = (void *)syscall_argn(args, 4);
                 uint32_t len = (uint32_t)syscall_argn(args, 5);
-                if (!user_buf || !p_copy_to_user || len == 0 || len > sizeof(u_resp_buf.raw)) {
+                if (!user_buf || len == 0 || len > sizeof(u_resp_buf.raw)) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
@@ -892,7 +905,7 @@ static void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 } else {
                     kpm_memcpy(u_resp_buf.raw, (const void *)target_field, len);
                 }
-                args->ret = (p_copy_to_user(user_buf, u_resp_buf.raw, len) == 0) ? 0 : (uint64_t)-14;
+                args->ret = (safe_copy_to_user(user_buf, u_resp_buf.raw, len) == 0) ? 0 : (uint64_t)-14;
             } else {
                 args->ret = (uint64_t)-1;
             }
@@ -912,13 +925,13 @@ static long heo_companion_init(const char *args, const char *event, void *reserv
     pr_info("[HEO-KPM] Target SoC: Snapdragon 8+ Gen 1 (SM8475) | KernelPatch EL1\n");
 
     /* 1. Resolve Core Kernel Helpers with fallback */
-    p_copy_to_user = (void *)kallsyms_lookup_name("__arch_copy_to_user");
+    p_copy_to_user = (void *)kallsyms_lookup_name("copy_to_user_nofault");
+    if (!p_copy_to_user) p_copy_to_user = (void *)kallsyms_lookup_name("__arch_copy_to_user");
     if (!p_copy_to_user) p_copy_to_user = (void *)kallsyms_lookup_name("_copy_to_user");
-    if (!p_copy_to_user) p_copy_to_user = (void *)kallsyms_lookup_name("raw_copy_to_user");
 
-    p_copy_from_user = (void *)kallsyms_lookup_name("__arch_copy_from_user");
+    p_copy_from_user = (void *)kallsyms_lookup_name("copy_from_user_nofault");
+    if (!p_copy_from_user) p_copy_from_user = (void *)kallsyms_lookup_name("__arch_copy_from_user");
     if (!p_copy_from_user) p_copy_from_user = (void *)kallsyms_lookup_name("_copy_from_user");
-    if (!p_copy_from_user) p_copy_from_user = (void *)kallsyms_lookup_name("raw_copy_from_user");
 
     p_knofault = (void *)kallsyms_lookup_name("copy_from_kernel_nofault");
     p_ioremap_cache = (void *)kallsyms_lookup_name("ioremap_cache");
@@ -930,9 +943,8 @@ static long heo_companion_init(const char *args, const char *event, void *reserv
     p_jiffies = (unsigned long *)kallsyms_lookup_name("jiffies_64");
     if (!p_jiffies) p_jiffies = (unsigned long *)kallsyms_lookup_name("jiffies");
 
-    if (!p_copy_to_user || !p_copy_from_user) {
-        pr_err("[HEO-KPM] copy_to/from_user unresolved — aborting\n");
-        return -1;
+    if (!p_copy_from_user) {
+        pr_warn("[HEO-KPM] kallsyms copy helpers partial, using kputils compat fallback\n");
     }
 
     /* 2. Resolve CFS Tunables & Apply Real-Time Sovereign Profile */
@@ -986,23 +998,23 @@ static long heo_companion_init(const char *args, const char *event, void *reserv
     }
 
     /* 6. Hook Syscall prctl (0x48454F) */
-    hook_err_t err = inline_hook_syscalln(__NR_prctl, 5, before_prctl_hook, NULL, NULL);
+    hook_err_t err = hook_syscalln(__NR_prctl, 5, before_prctl_hook, NULL, NULL);
     if (err) {
-        pr_err("[HEO-KPM] inline_hook_syscalln(__NR_prctl) failed: %d\n", err);
+        pr_err("[HEO-KPM] hook_syscalln(__NR_prctl) failed: %d\n", err);
         return -1;
     }
 
     kpm_memset(g_fork_rules, 0, sizeof(g_fork_rules));
-    pr_info("[HEO-KPM] Sovereign Ring 0 Companion v5.1 ONLINE & OPERATIONAL 👑\n");
+    pr_info("[HEO-KPM] Sovereign Ring 0 Companion v5.2.1 ONLINE & OPERATIONAL 👑\n");
     return 0;
 }
 
 static long heo_companion_exit(void *reserved) {
     (void)reserved;
-    pr_info("[HEO-KPM] Unloading HEO Ring 0 Sovereign Companion v5.1...\n");
+    pr_info("[HEO-KPM] Unloading HEO Ring 0 Sovereign Companion v5.2.1...\n");
 
     /* 1. Unhook prctl */
-    inline_unhook_syscalln(__NR_prctl, before_prctl_hook, NULL);
+    unhook_syscalln(__NR_prctl, before_prctl_hook, NULL);
 
     /* 2. Unhook select_task_rq */
     if (p_select_task_rq && g_comm_offset > 0) {
