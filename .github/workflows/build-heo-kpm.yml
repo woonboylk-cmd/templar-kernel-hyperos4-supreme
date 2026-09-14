@@ -29,6 +29,8 @@ jobs:
           cp kpms_src/heo_ring0_companion.c KernelPatch/kpms/arsenal/heo-ring0-companion.c
           cp kpms_src/heo_scheduler_titan.c KernelPatch/kpms/arsenal/heo-scheduler-titan.c
           cp kpms_src/pseudo_mglru_supreme.c KernelPatch/kpms/arsenal/pseudo-mglru-supreme.c
+          cp kpms_src/pixel11_camera_safe_spoofer.c KernelPatch/kpms/arsenal/pixel11-camera-safe-spoofer.c
+          cp kpms_src/susfs_stealth_root.c KernelPatch/kpms/arsenal/susfs-stealth-root.c
 
           cat << 'EOF' > KernelPatch/kpms/arsenal/Makefile
           KP_DIR ?= ../..
@@ -41,7 +43,9 @@ jobs:
 
           KPMS := heo-ring0-companion.kpm \
                   heo-scheduler-titan.kpm \
-                  pseudo-mglru-supreme.kpm
+                  pseudo-mglru-supreme.kpm \
+                  pixel11-camera-safe-spoofer.kpm \
+                  susfs-stealth-root.kpm
 
           all: $(KPMS)
 

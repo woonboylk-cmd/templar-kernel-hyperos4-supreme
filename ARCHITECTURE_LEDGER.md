@@ -19,8 +19,8 @@
 | **HEO Ring 0 Companion v4.2.0** | `heo-ring0-companion.kpm` | Master Bridge, Full Introspection, Credential Elevation & Zero-Lock Steering | `inline_hook_syscalln` on `__NR_prctl` + `hook_wrap4` on `select_task_rq` | **Zero-Lock**: Dynamic offset reading, 0 deadlocks |
 | **HEO Scheduler TITAN v2.0** | `heo-scheduler-titan.kpm` | Standalone CFS Sovereign Governor & Core Steering | `hook_wrap4` on `select_task_rq` + CFS latency direct locks | **Zero-Lock**: Dynamic offset reading, 0 deadlocks |
 | **Pseudo-MGLRU Supreme v2.0** | `pseudo-mglru-supreme.kpm` | Generational LRU Emulation & Page Reclaim Shield | `hook_wrap3` on `get_scan_count` + VM tunables | Safe hook on reclaim context |
-
-*Note: Previous dummy modules (`susfs-stealth-root`, `pixel11-camera-safe-spoofer`, `ring0-netshield-supreme`, `zstd-memory-engine`) which contained empty hook stubs have been permanently decommissioned to guarantee 100% technical authenticity.*
+| **Pixel 11 Spoofer v3.0** | `pixel11-camera-safe-spoofer.kpm` | In-Place Syscall Redirection (`build.prop` $\rightarrow$ `/data/adb/p11.prop`) with Leica Camera Whitelist | `inline_hook_syscalln` on `__NR_openat` | In-place userspace buffer redirection |
+| **SuSFS Stealth Root v3.0** | `susfs-stealth-root.kpm` | Kernel-Level Root Path Cloaking (`-ENOENT` for untrusted apps) | `inline_hook_syscalln` on `__NR_openat` | Selective path denial, zero lock |
 
 ---
 
@@ -76,6 +76,8 @@ Authenticated Syscall: `prctl(0x48454F, cmd, arg2, arg3, arg4)`
    - `heo-ring0-companion.kpm`
    - `heo-scheduler-titan.kpm`
    - `pseudo-mglru-supreme.kpm`
+   - `pixel11-camera-safe-spoofer.kpm`
+   - `susfs-stealth-root.kpm`
    - `kpm-arsenal-kernel5.10-SM8475.zip`
 3. `/data/adb/kpm/`:
    - Persistent autoload directory for KernelPatch / APatch.
