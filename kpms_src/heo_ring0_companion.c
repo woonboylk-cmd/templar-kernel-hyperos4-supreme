@@ -31,10 +31,10 @@
 #include <asm/current.h>
 
 KPM_NAME("heo-ring0-companion");
-KPM_VERSION("4.3.0");
+KPM_VERSION("4.3.1");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Antigravity & vric");
-KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v4.3.0 - 6 Superpowers: KREAD_CHAIN, KALLSYMS_LEAK, LIST_WALK, V2P+PREAD, STRUCT_READ, KREAD 1MB");
+KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v4.3.1 Hardened - Zero Stack Bloat, Hardware MMU Protected");
 
 #define HEO_MAGIC_PRCTL          0x48454F    /* 'HEO' in ASCII */
 
@@ -187,6 +187,11 @@ static volatile unsigned long stat_tasks_steered = 0;
 static volatile unsigned long stat_bloat_demotes = 0;
 static volatile unsigned long stat_ui_boosts = 0;
 static volatile unsigned long stat_ai_steers = 0;
+
+/* Zero-Stack Static Response Buffers (Immune to Kernel Stack Overflow in EL1) */
+static struct heo_chain_resp g_chain_resp;
+static struct heo_kallsyms_resp g_kallsyms_resp;
+static struct heo_list_walk_resp g_list_walk_resp;
 
 /* Freestanding inline helper functions (100% Zero GOT 311 Relocation Compliant) */
 static inline size_t k_strlen(const char *s) {
@@ -670,12 +675,27 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
+                /* Hardware PAN & Kernel Address Space Defense */
+                if (kaddr < 0xFFFF000000000000ULL) {
+                    args->ret = (uint64_t)-14;
+                    break;
+                }
+                if (arm64_at_s1e1r(kaddr) == 0ULL) {
+                    args->ret = (uint64_t)-14;
+                    break;
+                }
                 unsigned long copied = 0;
                 unsigned long chunk_size = 4096;
                 int err = 0;
                 while (copied < len) {
+                    unsigned long cur_kaddr = kaddr + copied;
+                    /* Check MMU translation on each 4KB page boundary */
+                    if ((cur_kaddr & 0xFFFULL) == 0 && arm64_at_s1e1r(cur_kaddr) == 0ULL) {
+                        err = -14;
+                        break;
+                    }
                     unsigned long to_copy = (len - copied > chunk_size) ? chunk_size : (len - copied);
-                    if (p_copy_to_user((char *)user_buf + copied, (const char *)kaddr + copied, to_copy) != 0) {
+                    if (p_copy_to_user((char *)user_buf + copied, (const char *)cur_kaddr, to_copy) != 0) {
                         err = -14;
                         break;
                     }
@@ -717,8 +737,8 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
          */
         case HEO_CMD_RESOLVE_SYMBOL: {
             if (authorized_task_ptr == task_now) {
-                const void *user_name = (const void *)syscall_argn(args, 2);
-                if (!user_name || !p_copy_from_user) {
+                void *user_name = (void *)syscall_argn(args, 2);
+                if (!user_name || !p_copy_from_user || !p_copy_to_user) {
                     args->ret = 0;
                     break;
                 }
@@ -726,9 +746,11 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 k_memset(sym_name, 0, sizeof(sym_name));
                 if (p_copy_from_user(sym_name, user_name, 63) == 0) {
                     sym_name[63] = '\0';
-                    unsigned long addr = (unsigned long)kallsyms_lookup_name(sym_name);
+                    uint64_t addr = (uint64_t)kallsyms_lookup_name(sym_name);
                     args->ret = addr;
-                    pr_info("[HEO-KPM] Resolved symbol '%s' -> 0x%lx\n", sym_name, addr);
+                    /* Copy 64-bit address back into user buffer for Java/Kotlin 64-bit integrity */
+                    p_copy_to_user(user_name, &addr, sizeof(addr));
+                    pr_info("[HEO-KPM] Resolved symbol '%s' -> 0x%llx\n", sym_name, (unsigned long long)addr);
                 } else {
                     args->ret = 0;
                 }
@@ -793,24 +815,24 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 int failed = 0;
                 for (uint32_t h = 0; h < req.num_hops; h++) {
                     uint64_t next_addr = curr + req.offsets[h];
-                    if (next_addr < 0xFFFF000000000000ULL) {
+                    /* Hardware PAN & Kernel Address Space Defense */
+                    if (next_addr < 0xFFFF000000000000ULL || arm64_at_s1e1r(next_addr) == 0ULL) {
                         failed = 1;
                         break;
                     }
                     curr = *(const uint64_t *)next_addr;
                 }
-                if (failed || curr < 0xFFFF000000000000ULL) {
+                if (failed || curr < 0xFFFF000000000000ULL || arm64_at_s1e1r(curr) == 0ULL) {
                     args->ret = (uint64_t)-14;
                     break;
                 }
-                struct heo_chain_resp resp;
-                k_memset(&resp, 0, sizeof(resp));
-                resp.final_ptr = curr;
+                k_memset(&g_chain_resp, 0, sizeof(g_chain_resp));
+                g_chain_resp.final_ptr = curr;
                 if (req.read_len > 0) {
-                    k_memcpy(resp.data, (const void *)curr, req.read_len);
-                    resp.bytes_read = req.read_len;
+                    k_memcpy(g_chain_resp.data, (const void *)curr, req.read_len);
+                    g_chain_resp.bytes_read = req.read_len;
                 }
-                if (p_copy_to_user(user_resp, &resp, sizeof(resp)) == 0) {
+                if (p_copy_to_user(user_resp, &g_chain_resp, sizeof(g_chain_resp)) == 0) {
                     args->ret = 0;
                 } else {
                     args->ret = (uint64_t)-14;
@@ -842,8 +864,7 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 uint32_t max_res = filter.max_results;
                 if (max_res == 0 || max_res > 64) max_res = 64;
 
-                struct heo_kallsyms_resp resp;
-                k_memset(&resp, 0, sizeof(resp));
+                k_memset(&g_kallsyms_resp, 0, sizeof(g_kallsyms_resp));
 
                 if (p_kallsyms_on_each_symbol) {
                     struct kallsyms_leak_ctx ctx;
@@ -851,13 +872,13 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                     ctx.prefix_len = k_strlen(filter.prefix);
                     ctx.max_count = max_res;
                     ctx.found_count = 0;
-                    ctx.entries = resp.entries;
+                    ctx.entries = g_kallsyms_resp.entries;
 
                     p_kallsyms_on_each_symbol(kallsyms_leak_cb, &ctx);
-                    resp.count = ctx.found_count;
+                    g_kallsyms_resp.count = ctx.found_count;
                 }
 
-                if (p_copy_to_user(user_resp, &resp, sizeof(resp)) == 0) {
+                if (p_copy_to_user(user_resp, &g_kallsyms_resp, sizeof(g_kallsyms_resp)) == 0) {
                     args->ret = 0;
                 } else {
                     args->ret = (uint64_t)-14;
@@ -885,22 +906,21 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                     args->ret = (uint64_t)-14;
                     break;
                 }
-                if (req.head_ptr < 0xFFFF000000000000ULL || req.max_entries == 0 || req.max_entries > 128) {
+                if (req.head_ptr < 0xFFFF000000000000ULL || arm64_at_s1e1r(req.head_ptr) == 0ULL || req.max_entries == 0 || req.max_entries > 128) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
-                struct heo_list_walk_resp resp;
-                k_memset(&resp, 0, sizeof(resp));
+                k_memset(&g_list_walk_resp, 0, sizeof(g_list_walk_resp));
 
                 uint64_t curr = *(const uint64_t *)req.head_ptr; /* head->next */
                 uint32_t count = 0;
-                while (curr != req.head_ptr && curr >= 0xFFFF000000000000ULL && count < req.max_entries) {
+                while (curr != req.head_ptr && curr >= 0xFFFF000000000000ULL && arm64_at_s1e1r(curr) != 0ULL && count < req.max_entries) {
                     uint64_t node_base = curr - req.offset_in_node;
-                    resp.entries[count++] = node_base;
+                    g_list_walk_resp.entries[count++] = node_base;
                     curr = *(const uint64_t *)curr; /* advance to curr->next */
                 }
-                resp.count = count;
-                if (p_copy_to_user(user_resp, &resp, sizeof(resp)) == 0) {
+                g_list_walk_resp.count = count;
+                if (p_copy_to_user(user_resp, &g_list_walk_resp, sizeof(g_list_walk_resp)) == 0) {
                     args->ret = 0;
                 } else {
                     args->ret = (uint64_t)-14;
@@ -918,8 +938,12 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
         case HEO_CMD_V2P: {
             if (authorized_task_ptr == task_now) {
                 uint64_t vaddr = (uint64_t)syscall_argn(args, 2);
+                void *out_buf = (void *)syscall_argn(args, 3);
                 uint64_t paddr = arm64_at_s1e1r(vaddr);
                 args->ret = paddr;
+                if (out_buf && p_copy_to_user) {
+                    p_copy_to_user(out_buf, &paddr, sizeof(paddr));
+                }
                 pr_info("[HEO-KPM] V2P: VA 0x%llx -> PA 0x%llx\n", (unsigned long long)vaddr, (unsigned long long)paddr);
             } else {
                 args->ret = 0ULL;
@@ -936,7 +960,7 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                 uint64_t paddr = (uint64_t)syscall_argn(args, 2);
                 void *user_buf = (void *)syscall_argn(args, 3);
                 unsigned long len = (unsigned long)syscall_argn(args, 4);
-                if (!user_buf || !p_copy_to_user || len == 0 || len > 4096 || !p_ioremap_cache || !p_iounmap) {
+                if (paddr == 0ULL || !user_buf || !p_copy_to_user || len == 0 || len > 4096 || !p_ioremap_cache || !p_iounmap) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
@@ -981,8 +1005,12 @@ void before_prctl_hook(hook_fargs5_t *args, void *udata) {
                     args->ret = (uint64_t)-22;
                     break;
                 }
-                const void *target = (const void *)(req.base_ptr + req.offset);
-                if (p_copy_to_user(user_buf, target, req.size) == 0) {
+                uint64_t target = req.base_ptr + req.offset;
+                if (target < 0xFFFF000000000000ULL || arm64_at_s1e1r(target) == 0ULL) {
+                    args->ret = (uint64_t)-14;
+                    break;
+                }
+                if (p_copy_to_user(user_buf, (const void *)target, req.size) == 0) {
                     args->ret = 0;
                 } else {
                     args->ret = (uint64_t)-14;
