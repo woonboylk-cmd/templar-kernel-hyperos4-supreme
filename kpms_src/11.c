@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * KPM: Pixel 11 Pro XL Identity Spoofer — v4.2 TRULY Safe Boot
- * Fixed by Antigravity: Removed VFS Deadlock (filp_open), fixed VA Faults, removed unsafe PID resolver.
+ * KPM: Pixel 11 Pro XL Identity Spoofer — v4.3 
+ * Bản điều chỉnh: Xóa deadlock VFS, giữ nguyên triết lý guard v4.1, mở rộng bảo vệ boot sequence.
  */
 
 #include <compiler.h>
@@ -15,7 +15,7 @@
 #include <asm/current.h>
 
 KPM_NAME("pixel11-spoofer");
-KPM_VERSION("4.2.0");
+KPM_VERSION("4.3.0");
 KPM_LICENSE("GPL v2");
 
 #ifndef __NR_openat
@@ -33,32 +33,42 @@ KPM_LICENSE("GPL v2");
 #define FAKE_VFS_PATH        "/system/build.prop"
 #define FAKE_VFS_PATH_LEN    19
 
-static char *(*p_get_task_comm)(char *, unsigned long, void *) = (void *)0;
-
-/* Các hàm Utils (s_len, str_contains...) giữ nguyên như cũ */
-static inline size_t s_len(const char *s) {
-    size_t n = 0; if (!s) return 0;
-    while (s[n]) n++; return n;
+static __always_inline void *kpm_memset(void *dst, int c, unsigned long n) {
+    unsigned char *p = (unsigned char *)dst;
+    while (n--) *p++ = (unsigned char)c;
+    return dst;
 }
+
+static inline size_t s_len(const char *s) {
+    size_t n = 0;
+    if (!s) return 0;
+    while (s[n]) n++;
+    return n;
+}
+
 static inline int s_cmp(const char *a, const char *b) {
     while (*a && *a == *b) { a++; b++; }
     return (unsigned char)*a - (unsigned char)*b;
 }
+
 static inline int s_ncmp(const char *a, const char *b, size_t n) {
     while (n && *a && *a == *b) { a++; b++; n--; }
     if (n == 0) return 0;
     return (unsigned char)*a - (unsigned char)*b;
 }
+
 static inline int starts_with(const char *p, const char *pfx) {
     if (!p || !pfx) return 0;
     while (*pfx) { if (*p++ != *pfx++) return 0; }
     return 1;
 }
+
 static inline int str_contains(const char *haystack, const char *needle) {
     if (!haystack || !needle) return 0;
     const char *h = haystack;
     while (*h) {
-        const char *h_sub = h; const char *n_sub = needle;
+        const char *h_sub = h;
+        const char *n_sub = needle;
         while (*h_sub && *n_sub && (*h_sub == *n_sub)) { h_sub++; n_sub++; }
         if (!*n_sub) return 1;
         h++;
@@ -66,44 +76,79 @@ static inline int str_contains(const char *haystack, const char *needle) {
     return 0;
 }
 
-/* Guard Memory an toàn (Tránh EL1 Data Abort) */
-static inline int is_valid_user_addr(const void *addr) {
-    unsigned long a = (unsigned long)addr;
-    return (a != 0 && a < 0x0000800000000000UL); // ARM64 Userspace VA
+static int (*p_task_pid_nr_ns)(void *, int, void *) = (void *)0;
+static char *(*p_get_task_comm)(char *, unsigned long, void *) = (void *)0;
+
+/* Camera whitelist — substring match */
+static inline int is_camera_comm(const char *comm) {
+    if (!comm || !comm[0]) return 0;
+    if (str_contains(comm, "camera"))  return 1;
+    if (str_contains(comm, "gallery")) return 1;
+    if (str_contains(comm, "leica"))   return 1;
+    return 0;
 }
 
-/* Fallback check task bằng Comm thay vì PID */
+/* Kernel thread / early boot */
 static inline int is_early_task(void) {
-    if (p_get_task_comm) {
-        char comm[16] = {0};
-        p_get_task_comm(comm, sizeof(comm), current);
-        comm[15] = '\0';
-        if (starts_with(comm, "init")) return 1;
-        if (starts_with(comm, "swapper")) return 1;
-        if (starts_with(comm, "kworker")) return 1;
-        if (starts_with(comm, "ksoftirq")) return 1;
-        if (starts_with(comm, "vold")) return 1;
-        if (starts_with(comm, "apexd")) return 1;
-        // Camera bypass
-        if (str_contains(comm, "camera") || str_contains(comm, "gallery") || str_contains(comm, "leica")) return 1;
+    /* Thêm Fail-closed: Nếu mất hàm đọc tên, mặc định coi là early_task để skip spoof */
+    if (!p_get_task_comm) return 1;
+
+    /* Ưu tiên 1: check PID — init là 1, kthreadd là 2, kernel threads < 1000 */
+    if (p_task_pid_nr_ns) {
+        int pid = p_task_pid_nr_ns(current, 0, (void *)0);
+        if (pid > 0 && pid < 1000) return 1;   /* PID 1-999: hệ thống, chưa mount /data */
     }
+
+    /* Ưu tiên 2: comm-based fallback */
+    char comm[16] = {0};
+    p_get_task_comm(comm, sizeof(comm), current);
+    comm[15] = '\0';
+
+    if (starts_with(comm, "init"))   return 1;
+    if (starts_with(comm, "swapper")) return 1;
+    if (starts_with(comm, "kworker")) return 1;
+    if (starts_with(comm, "ksoftirq")) return 1;
+    if (starts_with(comm, "vold"))   return 1;
+    if (starts_with(comm, "apexd"))  return 1;
+    
+    /* System & Framework core (Giữ nguyên từ v4.1) */
+    if (starts_with(comm, "servicemanager")) return 1;
+    if (starts_with(comm, "hwservicemanage")) return 1;
+    if (starts_with(comm, "zygote")) return 1;
+    if (starts_with(comm, "system_server")) return 1;
+    
+    /* Tăng cường Guard: Các tiến trình khởi tạo Boot Sequence (Hardware / HALs / Services) */
+    if (starts_with(comm, "surfaceflinger")) return 1;
+    if (starts_with(comm, "bootanim")) return 1;
+    if (starts_with(comm, "keystore")) return 1;
+    if (starts_with(comm, "logd")) return 1;
+    if (starts_with(comm, "netd")) return 1;
+    if (str_contains(comm, "hardware")) return 1;
+    if (str_contains(comm, "vendor.qti")) return 1;
+    if (str_contains(comm, "vendor.xiaomi")) return 1;
+
+    if (is_camera_comm(comm)) return 1;
+    
     return 0;
 }
 
 static inline int ends_with_build_prop(const char *p) {
     size_t n = s_len(p);
-    if (n >= 11 && s_ncmp(p + n - 10, "build.prop", 10) == 0 && p[n-11] == '/') return 1;
-    if (n == 10 && s_ncmp(p, "build.prop", 10) == 0) return 1;
+    if (n >= 11 && s_ncmp(p + n - 10, "build.prop", 10) == 0 && p[n-11] == '/')
+        return 1;
+    if (n == 10 && s_ncmp(p, "build.prop", 10) == 0)
+        return 1;
     return 0;
 }
 
 static inline int path_excluded(const char *p) {
-    if (str_contains(p, "vendor")) return 1;
-    if (str_contains(p, "odm")) return 1;
-    if (str_contains(p, "apex")) return 1;
-    if (starts_with(p, "/sdcard/")) return 1;
-    if (starts_with(p, "/storage/")) return 1;
-    if (starts_with(p, "/data/")) return 1; 
+    if (str_contains(p, "vendor"))    return 1;
+    if (str_contains(p, "odm"))       return 1;
+    if (str_contains(p, "apex"))      return 1;
+    if (str_contains(p, "my_product"))return 1;
+    if (starts_with(p, "/sdcard/"))   return 1;
+    if (starts_with(p, "/storage/"))  return 1;
+    if (starts_with(p, "/data/"))     return 1;   /* bao gồm chính /data/adb/p11.prop */
     return 0;
 }
 
@@ -117,18 +162,24 @@ static inline int is_proc_fd_path(const char *p) {
 }
 
 static void spoof_common(void *user_path_ptr) {
-    if (!is_valid_user_addr(user_path_ptr)) return;
+    if (!user_path_ptr) return;
+
+    /* ═══ GUARD 1: early boot / kernel thread / camera / core services ═══ */
     if (is_early_task()) return;
 
+    /* ═══ GUARD 2: đọc path từ user ═══ */
     char path[128];
     long copied = compat_strncpy_from_user(path, user_path_ptr, sizeof(path) - 1);
     if (copied <= 0) return;
     path[sizeof(path) - 1] = '\0';
 
+    /* ═══ LAYER A ONLY: VFS build.prop ═══ */
     if (!ends_with_build_prop(path)) return;
-    if (path_excluded(path)) return;
+    if (path_excluded(path))         return;
 
-    if (s_len(path) < SPOOF_VFS_PATH_LEN) return; 
+    size_t path_len = s_len(path);
+    if (path_len < SPOOF_VFS_PATH_LEN) return;  /* buffer user không đủ chỗ */
+
     compat_copy_to_user(user_path_ptr, SPOOF_VFS_PATH, SPOOF_VFS_PATH_LEN + 1);
 }
 
@@ -150,8 +201,7 @@ static void after_readlinkat(hook_fargs4_t *args, void *udata) {
     void *user_path = (void *)syscall_argn(args, 1);
     void *user_buf  = (void *)syscall_argn(args, 2);
     size_t bufsiz   = (size_t)syscall_argn(args, 3);
-    
-    if (!is_valid_user_addr(user_path) || !is_valid_user_addr(user_buf) || bufsiz == 0) return;
+    if (!user_path || !user_buf || bufsiz == 0) return;
 
     char path[64];
     long copied = compat_strncpy_from_user(path, user_path, sizeof(path) - 1);
@@ -172,17 +222,32 @@ static void after_readlinkat(hook_fargs4_t *args, void *udata) {
         args->ret = (uint64_t)copy_len;
 }
 
+static void resolve_symbols(void) {
+    p_get_task_comm = (void *)kallsyms_lookup_name("__get_task_comm");
+    if (!p_get_task_comm) p_get_task_comm = (void *)kallsyms_lookup_name("get_task_comm");
+
+    p_task_pid_nr_ns = (void *)kallsyms_lookup_name("__task_pid_nr_ns");
+
+    pr_info("[p11] resolved: comm=%d pid=%d\n", !!p_get_task_comm, !!p_task_pid_nr_ns);
+}
+
 static long init(const char *args, const char *event, void *reserved) {
     (void)args; (void)event; (void)reserved;
 
-    p_get_task_comm = (void *)kallsyms_lookup_name("__get_task_comm");
-    if (!p_get_task_comm) p_get_task_comm = (void *)kallsyms_lookup_name("get_task_comm");
+    resolve_symbols();
+
+    /* Fail-closed: Hủy load module nếu không tìm thấy hàm đọc comm 
+       Để đảm bảo không bẻ lái lung tung nếu filter bị hỏng */
+    if (!p_get_task_comm) {
+        pr_err("[p11] get_task_comm unresolved — FAILING CLOSED (abort)\n");
+        return -1; 
+    }
 
     hook_syscalln(__NR_openat,     4, before_openat,  NULL, NULL);
     hook_syscalln(__NR_openat2,    4, before_openat2, NULL, NULL);
     hook_syscalln(__NR_readlinkat, 4, NULL, after_readlinkat, NULL);
 
-    pr_info("[p11] v4.2 TRULY Safe Boot ACTIVE\n");
+    pr_info("[p11] v4.3 Active - Extended Boot Guard - VFS Deadlock Free\n");
     return 0;
 }
 
