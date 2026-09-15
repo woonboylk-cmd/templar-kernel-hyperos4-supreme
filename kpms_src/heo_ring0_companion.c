@@ -188,12 +188,12 @@ static unsigned long (*p_copy_to_user)(void *to, const void *from, unsigned long
 static unsigned long (*p_copy_from_user)(void *to, const void *from, unsigned long n) = (void *)0;
 
 static inline unsigned long safe_copy_to_user(void *to, const void *from, unsigned long n) {
-    if (p_copy_to_user) return safe_copy_to_user(to, from, n);
+    if (p_copy_to_user) return p_copy_to_user(to, from, n);
     return compat_copy_to_user(to, from, (int)n);
 }
 
 static inline unsigned long safe_copy_from_user(void *to, const void *from, unsigned long n) {
-    if (p_copy_from_user) return safe_copy_from_user(to, from, n);
+    if (p_copy_from_user) return p_copy_from_user(to, from, n);
     if (compat_strncpy_from_user((char *)to, (const char *)from, (long)n) >= 0) return 0;
     return (unsigned long)-14;
 }
