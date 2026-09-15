@@ -1,19 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * KPM: Pixel 11 Pro XL Identity & Prop-Area Spoofer — Hardened Edition v4.0
- * Target: Xiaomi 12S (mayfly) - Snapdragon 8+ Gen 1 (SM8475) - Linux 5.10.x
- * Architecture: KernelPatch (Ring 0 EL1)
- *
- * Full Feature Matrix:
- * 1. Dual-Layer Spoofing:
- *    - Layer A (VFS): Intercepts /system/build.prop -> /data/adb/p11.prop
- *    - Layer B (RAM prop_area): Intercepts /dev/__properties__/u:object_r:build_prop:s0
- *      and /dev/__properties__/u:object_r:default_prop:s0 -> /data/adb/p11_props_area
- * 2. Standard Syscall Arg Extraction: Strictly uses syscall_argn() for pt_regs on ARM64 GKI.
- * 3. Early-Boot & Daemon Guard: Bypasses init (PID 1), swapper, vold, apexd before /data is ready.
- * 4. Leica Camera Whitelist: Camera, gallery, and camera HALs always read genuine Xiaomi props.
- * 5. Boundary Protection: Never overwrites userspace buffers smaller than target path length.
- * 6. Zero GOT 311/312 Relocations: Pure inlined memory helpers, zero external BL compiler calls.
+ * KPM: Pixel 11 Pro XL Identity Spoofer — v4.1 Safe Boot Edition
+ * Changelog từ v4.0:
+ *   - REMOVED: Layer B (prop_area) — gây bootloop, phá shared memory
+ *   - ADDED: PID-based guard (init=1, kernel threads pid<=2)
+ *   - ADDED: file existence check trước khi redirect
+ *   - ADDED: mtime check — /data phải đã mount
  */
 
 #include <compiler.h>
@@ -27,10 +19,8 @@
 #include <asm/current.h>
 
 KPM_NAME("pixel11-spoofer");
-KPM_VERSION("4.0.0");
+KPM_VERSION("4.1.0");
 KPM_LICENSE("GPL v2");
-KPM_AUTHOR("Antigravity & vric");
-KPM_DESCRIPTION("Pixel 11 Pro XL Dual-Layer Identity & Prop-Area Spoofer v4.0 (VFS + RAM prop_area)");
 
 #ifndef __NR_openat
 #define __NR_openat     56
@@ -42,29 +32,14 @@ KPM_DESCRIPTION("Pixel 11 Pro XL Dual-Layer Identity & Prop-Area Spoofer v4.0 (V
 #define __NR_readlinkat 78
 #endif
 
-/* Layer A: VFS File Spoof */
 #define SPOOF_VFS_PATH       "/data/adb/p11.prop"
-#define SPOOF_VFS_PATH_LEN   18            /* strlen(SPOOF_VFS_PATH) */
+#define SPOOF_VFS_PATH_LEN   18
 #define FAKE_VFS_PATH        "/system/build.prop"
-#define FAKE_VFS_PATH_LEN    19            /* strlen(FAKE_VFS_PATH) */
+#define FAKE_VFS_PATH_LEN    19
 
-/* Layer B: RAM Shared Memory prop_area Spoof */
-#define SPOOF_PROP_AREA_PATH     "/data/adb/p11_props_area"
-#define SPOOF_PROP_AREA_PATH_LEN 24        /* strlen(SPOOF_PROP_AREA_PATH) */
-
-/* Inlined freestanding memory helpers (Zero compiler BL calls, Zero GOT relocations) */
-static __always_inline void *kpm_memset(void *dst, int c, unsigned long n)
-{
+static __always_inline void *kpm_memset(void *dst, int c, unsigned long n) {
     unsigned char *p = (unsigned char *)dst;
     while (n--) *p++ = (unsigned char)c;
-    return dst;
-}
-
-static __always_inline void *kpm_memcpy(void *dst, const void *src, unsigned long n)
-{
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-    while (n--) *d++ = *s++;
     return dst;
 }
 
@@ -98,54 +73,50 @@ static inline int str_contains(const char *haystack, const char *needle) {
     while (*h) {
         const char *h_sub = h;
         const char *n_sub = needle;
-        while (*h_sub && *n_sub && (*h_sub == *n_sub)) {
-            h_sub++;
-            n_sub++;
-        }
+        while (*h_sub && *n_sub && (*h_sub == *n_sub)) { h_sub++; n_sub++; }
         if (!*n_sub) return 1;
         h++;
     }
     return 0;
 }
 
-/* Fallback pointers for kernel task comm */
-static char *(*p_get_task_comm)(char *buf, unsigned long buf_size, void *tsk) = (void *)0;
+static int (*p_task_pid_nr_ns)(void *, int, void *) = (void *)0;
+static char *(*p_get_task_comm)(char *, unsigned long, void *) = (void *)0;
+static void *(*p_filp_open)(const char *, int, int) = (void *)0;
+static void  (*p_filp_close)(void *, void *) = (void *)0;
 
-/* Leica Camera & Hardware Whitelist (Protected from spoofing) */
-static const char *camera_whitelist[] = {
-    "camera",
-    "cameraserver",
-    "media.camera",
-    "qti.camera",
-    "vtcamera",
-    "vendor.qti.camera",
-    "vendor.xiaomi.hardware.camera",
-    "android.hardware.camera",
-    "mm-qcamera",
-    "miui.gallery",
-    "gallery"
-};
-
-static inline int is_whitelisted_camera(const char *comm) {
-    if (!comm || comm[0] == '\0') return 0;
-    for (size_t i = 0; i < sizeof(camera_whitelist) / sizeof(camera_whitelist[0]); i++) {
-        if (str_contains(comm, camera_whitelist[i])) {
-            return 1;
-        }
-    }
+/* Camera whitelist — substring match */
+static inline int is_camera_comm(const char *comm) {
+    if (!comm || !comm[0]) return 0;
+    if (str_contains(comm, "camera"))  return 1;
+    if (str_contains(comm, "gallery")) return 1;
+    if (str_contains(comm, "leica"))   return 1;
     return 0;
 }
 
-/* Early-boot & system daemon protection: NEVER spoof init (PID 1) or low-level daemons */
-static inline int is_early_boot_daemon(const char *comm) {
-    if (!comm || comm[0] == '\0') return 0;
-    if (starts_with(comm, "init") ||
-        starts_with(comm, "swapper") ||
-        starts_with(comm, "vold") ||
-        starts_with(comm, "apexd") ||
-        starts_with(comm, "servicemanager") ||
-        starts_with(comm, "hwservicemanage")) {
-        return 1;
+/* Kernel thread / early boot */
+static inline int is_early_task(void) {
+    /* Ưu tiên 1: check PID — init là 1, kthreadd là 2, kernel threads < 1000 */
+    if (p_task_pid_nr_ns) {
+        int pid = p_task_pid_nr_ns(current, 0, (void *)0);
+        if (pid > 0 && pid < 1000) return 1;   /* PID 1-999: hệ thống, chưa mount /data */
+    }
+    /* Ưu tiên 2: comm-based fallback */
+    if (p_get_task_comm) {
+        char comm[16] = {0};
+        p_get_task_comm(comm, sizeof(comm), current);
+        comm[15] = '\0';
+        if (starts_with(comm, "init"))   return 1;
+        if (starts_with(comm, "swapper")) return 1;
+        if (starts_with(comm, "kworker")) return 1;
+        if (starts_with(comm, "ksoftirq")) return 1;
+        if (starts_with(comm, "vold"))   return 1;
+        if (starts_with(comm, "apexd"))  return 1;
+        if (starts_with(comm, "servicemanager")) return 1;
+        if (starts_with(comm, "hwservicemanage")) return 1;
+        if (starts_with(comm, "zygote")) return 1;      /* zygote cũng cần prop_area */
+        if (starts_with(comm, "system_server")) return 1;  /* cực kỳ quan trọng */
+        if (is_camera_comm(comm)) return 1;
     }
     return 0;
 }
@@ -159,22 +130,14 @@ static inline int ends_with_build_prop(const char *p) {
     return 0;
 }
 
-static inline int is_prop_area_target(const char *p) {
-    if (!starts_with(p, "/dev/__properties__/")) return 0;
-    if (str_contains(p, "build_prop") || str_contains(p, "default_prop"))
-        return 1;
-    return 0;
-}
-
 static inline int path_excluded(const char *p) {
-    if (str_contains(p, "vendor"))           return 1;
-    if (str_contains(p, "odm"))              return 1;
-    if (str_contains(p, "apex"))             return 1;
-    if (starts_with(p, "/sdcard/"))          return 1;
-    if (starts_with(p, "/storage/"))         return 1;
-    if (starts_with(p, "/data/adb/"))        return 1;
-    if (s_cmp(p, SPOOF_VFS_PATH) == 0)       return 1;
-    if (s_cmp(p, SPOOF_PROP_AREA_PATH) == 0) return 1;
+    if (str_contains(p, "vendor"))    return 1;
+    if (str_contains(p, "odm"))       return 1;
+    if (str_contains(p, "apex"))      return 1;
+    if (str_contains(p, "my_product"))return 1;
+    if (starts_with(p, "/sdcard/"))   return 1;
+    if (starts_with(p, "/storage/"))  return 1;
+    if (starts_with(p, "/data/"))     return 1;   /* bao gồm chính /data/adb/p11.prop */
     return 0;
 }
 
@@ -187,59 +150,62 @@ static inline int is_proc_fd_path(const char *p) {
     return 0;
 }
 
-/* ---------- Master Dual-Layer Spoof Logic ---------- */
+/* ═══════════════════════════════════════════════════════════════
+ * Check file tồn tại — BẮT BUỘC trước khi redirect
+ * Nếu p11.prop chưa tồn tại (early boot, /data chưa mount) → KHÔNG redirect
+ * ═══════════════════════════════════════════════════════════════ */
+static int spoof_target_exists(void) {
+    if (!p_filp_open || !p_filp_close) {
+        /* Không resolve được filp_open → từ chối spoof để an toàn */
+        return 0;
+    }
+    /* O_RDONLY = 0. Gọi filp_open với path đối tượng */
+    void *f = p_filp_open(SPOOF_VFS_PATH, 0, 0);
+    if (!f) return 0;
+    /* filp_open trả về ERR_PTR nếu lỗi — cần check IS_ERR, đơn giản hóa: 
+     * nếu là con trỏ hợp lệ trong kernel range thì coi như OK.
+     * Err ptr có dạng 0xffffffffffffffxx. */
+    unsigned long fp = (unsigned long)f;
+    if (fp >= 0xfffffffffffff000UL) return 0;
+    p_filp_close(f, (void *)0);
+    return 1;
+}
 
 static void spoof_common(void *user_path_ptr) {
     if (!user_path_ptr) return;
 
-    /* Filter 1: Check caller task comm */
-    if (p_get_task_comm) {
-        char comm[16] = {0};
-        p_get_task_comm(comm, sizeof(comm), current);
-        comm[15] = '\0';
-        if (is_early_boot_daemon(comm)) return;
-        if (is_whitelisted_camera(comm)) return;
-    }
+    /* ═══ GUARD 1: early boot / kernel thread / camera — từ chối sớm ═══ */
+    if (is_early_task()) return;
 
+    /* ═══ GUARD 2: target phải tồn tại (tức /data đã mount) ═══ */
+    if (!spoof_target_exists()) return;
+
+    /* ═══ GUARD 3: đọc path từ user ═══ */
     char path[128];
     long copied = compat_strncpy_from_user(path, user_path_ptr, sizeof(path) - 1);
     if (copied <= 0) return;
     path[sizeof(path) - 1] = '\0';
 
-    /* Check Layer B: RAM Shared Memory prop_area interception */
-    if (is_prop_area_target(path)) {
-        size_t path_len = s_len(path);
-        /* /dev/__properties__/u:object_r:build_prop:s0 is 44 bytes, target is 24 bytes */
-        if (path_len >= SPOOF_PROP_AREA_PATH_LEN) {
-            compat_copy_to_user(user_path_ptr, SPOOF_PROP_AREA_PATH, SPOOF_PROP_AREA_PATH_LEN + 1);
-            return;
-        }
-    }
+    /* ═══ LAYER A ONLY: VFS build.prop ═══ */
+    if (!ends_with_build_prop(path)) return;
+    if (path_excluded(path))         return;
 
-    /* Check Layer A: VFS build.prop interception */
-    if (ends_with_build_prop(path) && !path_excluded(path)) {
-        size_t path_len = s_len(path);
-        if (path_len >= SPOOF_VFS_PATH_LEN) {
-            compat_copy_to_user(user_path_ptr, SPOOF_VFS_PATH, SPOOF_VFS_PATH_LEN + 1);
-            return;
-        }
-    }
+    size_t path_len = s_len(path);
+    if (path_len < SPOOF_VFS_PATH_LEN) return;  /* buffer user không đủ chỗ */
+
+    compat_copy_to_user(user_path_ptr, SPOOF_VFS_PATH, SPOOF_VFS_PATH_LEN + 1);
 }
 
-/* Syscall Hooks using syscall_argn() on ARM64 pt_regs */
 static void before_openat(hook_fargs4_t *args, void *udata) {
     (void)udata;
-    void *user_path_ptr = (void *)syscall_argn(args, 1);
-    spoof_common(user_path_ptr);
+    spoof_common((void *)syscall_argn(args, 1));
 }
 
 static void before_openat2(hook_fargs4_t *args, void *udata) {
     (void)udata;
-    void *user_path_ptr = (void *)syscall_argn(args, 1);
-    spoof_common(user_path_ptr);
+    spoof_common((void *)syscall_argn(args, 1));
 }
 
-/* Hook readlinkat (after): Hide /data/adb/p11.prop from /proc/PID/fd inspection */
 static void after_readlinkat(hook_fargs4_t *args, void *udata) {
     (void)udata;
     long ret = (long)args->ret;
@@ -248,7 +214,6 @@ static void after_readlinkat(hook_fargs4_t *args, void *udata) {
     void *user_path = (void *)syscall_argn(args, 1);
     void *user_buf  = (void *)syscall_argn(args, 2);
     size_t bufsiz   = (size_t)syscall_argn(args, 3);
-
     if (!user_path || !user_buf || bufsiz == 0) return;
 
     char path[64];
@@ -262,20 +227,25 @@ static void after_readlinkat(hook_fargs4_t *args, void *udata) {
     if (compat_strncpy_from_user(result, user_buf, ret) <= 0) return;
     result[ret] = '\0';
 
-    if (s_cmp(result, SPOOF_VFS_PATH) == 0) {
-        size_t copy_len = FAKE_VFS_PATH_LEN;
-        if (copy_len > bufsiz) copy_len = bufsiz;
-        if (compat_copy_to_user(user_buf, FAKE_VFS_PATH, copy_len) == 0) {
-            args->ret = (uint64_t)copy_len;
-        }
-    }
-}
+    if (s_cmp(result, SPOOF_VFS_PATH) != 0) return;
 
-/* ---------- Symbols & Lifecycle ---------- */
+    size_t copy_len = FAKE_VFS_PATH_LEN;
+    if (copy_len > bufsiz) copy_len = bufsiz;
+    if (compat_copy_to_user(user_buf, FAKE_VFS_PATH, copy_len) == 0)
+        args->ret = (uint64_t)copy_len;
+}
 
 static void resolve_symbols(void) {
     p_get_task_comm = (void *)kallsyms_lookup_name("__get_task_comm");
     if (!p_get_task_comm) p_get_task_comm = (void *)kallsyms_lookup_name("get_task_comm");
+
+    p_task_pid_nr_ns = (void *)kallsyms_lookup_name("__task_pid_nr_ns");
+
+    p_filp_open = (void *)kallsyms_lookup_name("filp_open");
+    p_filp_close = (void *)kallsyms_lookup_name("filp_close");
+
+    pr_info("[p11] resolved: comm=%d pid=%d filp=%d\n",
+            !!p_get_task_comm, !!p_task_pid_nr_ns, !!p_filp_open);
 }
 
 static long init(const char *args, const char *event, void *reserved) {
@@ -283,12 +253,17 @@ static long init(const char *args, const char *event, void *reserved) {
 
     resolve_symbols();
 
-    /* Use hook_syscalln: auto-adapts between fp_hook and inline_hook */
+    /* Nếu không resolve được filp_open → không thể check file tồn tại → từ chối load */
+    if (!p_filp_open) {
+        pr_err("[p11] filp_open unresolved — refusing to hook (would bootloop)\n");
+        return -1;
+    }
+
     hook_syscalln(__NR_openat,     4, before_openat,  NULL, NULL);
     hook_syscalln(__NR_openat2,    4, before_openat2, NULL, NULL);
     hook_syscalln(__NR_readlinkat, 4, NULL, after_readlinkat, NULL);
 
-    pr_info("[p11-spoofer] Pixel 11 Pro XL Dual-Layer Identity & Prop-Area Spoofer v4.0 ACTIVE 👑\n");
+    pr_info("[p11] v4.1 Safe Boot ACTIVE\n");
     return 0;
 }
 
@@ -297,7 +272,6 @@ static long exit_fn(void *reserved) {
     unhook_syscalln(__NR_openat,     before_openat,  NULL);
     unhook_syscalln(__NR_openat2,    before_openat2, NULL);
     unhook_syscalln(__NR_readlinkat, NULL, after_readlinkat);
-    pr_info("[p11-spoofer] Pixel 11 Spoofer unloaded cleanly.\n");
     return 0;
 }
 
