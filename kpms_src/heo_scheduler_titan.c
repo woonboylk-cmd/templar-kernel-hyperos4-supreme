@@ -222,9 +222,7 @@ static void after_select_task_rq(hook_fargs4_t *args, void *udata) {
      * Sovereign privilege: HEO Master App, SurfaceFlinger, and RenderThread
      * upgraded from sluggish LITTLE cores (0-3) directly to Cortex-X2 (Core 7).
      */
-    if (str_contains(comm, "myapplicat") ||
-        str_contains(comm, "heo")        ||
-        str_contains(comm, "surfacefl")  ||
+    if (str_contains(comm, "surfacefl")  ||
         str_contains(comm, "RenderThrea")||
         str_contains(comm, "composer-s")) {
         if (target_cpu < 4) {

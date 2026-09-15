@@ -373,9 +373,8 @@ static void after_select_task_rq(hook_fargs4_t *args, void *udata) {
         return;
     }
 
-    /* 4. Built-in Sovereign UI & HEO Master Elevation */
-    if (str_contains(comm, "myapplicat") || str_contains(comm, "heo") ||
-        str_contains(comm, "surfacefl")  || str_contains(comm, "RenderThrea") ||
+    /* 4. Built-in Sovereign UI & Graphics Elevation */
+    if (str_contains(comm, "surfacefl")  || str_contains(comm, "RenderThrea") ||
         str_contains(comm, "composer-s")) {
         if (target_cpu < 4) {
             args->ret = 7; /* Cortex-X2 Prime (3.2 GHz) */
