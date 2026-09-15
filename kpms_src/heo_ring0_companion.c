@@ -32,10 +32,10 @@
 #include <asm/current.h>
 
 KPM_NAME("heo-ring0-companion");
-KPM_VERSION("5.3.0");
+KPM_VERSION("5.4.0");
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("Antigravity & vric");
-KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v5.3.0 - Pure Ring 0 Engine, 6 Superpowers, Safe Syscall Hook");
+KPM_DESCRIPTION("HEO Ring 0 Sovereign Companion v5.4.0 - VA Guard Fix: prevent EL1 Data Abort on bogus user_buf");
 
 /* KPM-safe memory helpers: inlined by compiler, zero external BL memcpy/memset */
 static __always_inline void *kpm_memset(void *dst, int c, unsigned long n)
@@ -187,12 +187,26 @@ static char *(*p_get_task_comm)(char *buf, unsigned long buf_size, void *tsk) = 
 static unsigned long (*p_copy_to_user)(void *to, const void *from, unsigned long n) = (void *)0;
 static unsigned long (*p_copy_from_user)(void *to, const void *from, unsigned long n) = (void *)0;
 
+/* Validate that a pointer is in AArch64 userspace VA range (< 0x0000800000000000).
+ * Prevents EL1 Data Abort / kernel panic when app passes a stale/bogus address. */
+static inline int is_valid_user_addr(const void *addr, unsigned long n) {
+    unsigned long a = (unsigned long)addr;
+    /* userspace VA ceiling on AArch64 Android (39-bit VA): 0x0000800000000000 */
+    if (a == 0) return 0;
+    if (a >= 0x0000800000000000UL) return 0;
+    /* Overflow check: a + n must not wrap */
+    if (n > 0 && (a + n) < a) return 0;
+    return 1;
+}
+
 static inline unsigned long safe_copy_to_user(void *to, const void *from, unsigned long n) {
+    if (!is_valid_user_addr(to, n)) return n; /* non-zero == -EFAULT */
     if (p_copy_to_user) return p_copy_to_user(to, from, n);
     return compat_copy_to_user(to, from, (int)n);
 }
 
 static inline unsigned long safe_copy_from_user(void *to, const void *from, unsigned long n) {
+    if (!is_valid_user_addr(from, n)) return (unsigned long)-14;
     if (p_copy_from_user) return p_copy_from_user(to, from, n);
     if (compat_strncpy_from_user((char *)to, (const char *)from, (long)n) >= 0) return 0;
     return (unsigned long)-14;
