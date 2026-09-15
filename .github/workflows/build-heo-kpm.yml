@@ -73,7 +73,7 @@ jobs:
           for kpm in output_kpms/*.kpm; do
             echo "--- Checking $(basename $kpm) ---"
             llvm-readelf-14 -r "$kpm"
-            if llvm-readelf-14 -r "$kpm" | grep -iE 'GOT|311|312'; then
+            if llvm-readelf-14 -r "$kpm" | grep -iE 'R_AARCH64_.*GOT|_GOT_'; then
               echo "ERROR: Unsupported GOT relocation detected in $kpm!"
               FAILED=1
             fi
